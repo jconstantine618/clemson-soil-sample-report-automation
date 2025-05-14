@@ -4,62 +4,85 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import time
 from urllib.parse import urljoin
+import re  # for extracting digits from sample number
 
 st.set_page_config(page_title="Clemson Soil Report Scraper", layout="wide")
-
 st.title("🌱 Clemson Soil Report Scraper")
-st.markdown("Scrapes **`WarmSeasonGrsMaint`** data from Clemson's soil test reports.")
+st.markdown("Scrapes full soil test data and **`WarmSeasonGrsMaint`**, including account number from Sample No.")
 
 base_url = "https://psaweb.clemson.edu"
 main_url = urljoin(base_url, "/soils/aspx/results.aspx?qs=1&LabNumA=25050901&LabNumB=25050930&DateA=&DateB=&Name=&UserName=AGSRVLB&AdminAuth=0&submit=SEARCH")
 
 if st.button("Start Scraping"):
-    with st.spinner("Scraping Clemson soil lab reports..."):
+    with st.spinner("Scraping report list and detailed pages..."):
         records = []
 
         try:
-            main_response = requests.get(main_url, headers={"User-Agent": "Mozilla/5.0"})
-            soup = BeautifulSoup(main_response.text, "html.parser")
+            response = requests.get(main_url, headers={"User-Agent": "Mozilla/5.0"})
+            soup = BeautifulSoup(response.text, "html.parser")
+            table = soup.find("table")
+            rows = table.find_all("tr")[1:]  # Skip header row
 
-            lab_links = []
-            for a in soup.find_all('a', href=True):
-                if "standardreport.aspx" in a['href']:
-                    full_link = urljoin(base_url, a['href'])
-                    lab_links.append((a.text.strip(), full_link))
+            for row in rows:
+                cells = row.find_all("td")
+                if len(cells) < 20:
+                    continue
 
-            st.success(f"✅ Found {len(lab_links)} lab reports to process.")
+                name = cells[0].text.strip()
+                date_sampled = cells[1].text.strip()
+                sample_no = cells[2].text.strip()
+                account_number = re.sub(r"\D", "", sample_no)  # ✅ Extract digits only
+                lab_num = cells[3].text.strip()
+                detail_link = urljoin(base_url, cells[3].find("a")["href"]) if cells[3].find("a") else ""
 
-            for labnum, url in lab_links:
-                r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
-                rsoup = BeautifulSoup(r.text, "html.parser")
+                soil_data = {
+                    "Account Number": account_number,
+                    "Name": name,
+                    "Date Sampled": date_sampled,
+                    "Sample No": sample_no,
+                    "Lab Number": lab_num,
+                    "Report URL": detail_link,
+                    "Soil pH": cells[4].text.strip(),
+                    "Buffer pH": cells[5].text.strip(),
+                    "P (lbs/A)": cells[6].text.strip(),
+                    "K (lbs/A)": cells[7].text.strip(),
+                    "Ca (lbs/A)": cells[8].text.strip(),
+                    "Mg (lbs/A)": cells[9].text.strip(),
+                    "Zn (lbs/A)": cells[10].text.strip(),
+                    "Mn (lbs/A)": cells[11].text.strip(),
+                    "Cu (lbs/A)": cells[12].text.strip(),
+                    "B (lbs/A)": cells[13].text.strip(),
+                    "Na (lbs/A)": cells[14].text.strip(),
+                    "S (lbs/A)": cells[15].text.strip(),
+                    "EC (mmhos/cm)": cells[16].text.strip(),
+                    "NO3-N (ppm)": cells[17].text.strip(),
+                    "OM (%)": cells[18].text.strip(),
+                    "Bulk Density (lbs/A)": cells[19].text.strip()
+                }
 
-                # Look specifically in the "Recommendations" or "Lime" section
+                # Scrape WarmSeasonGrsMaint value from detail report
                 warm_value = ""
-                for b in rsoup.find_all("b"):
-                    if "WarmSeasonGrsMaint" in b.get_text():
-                        parent = b.find_parent()
-                        if parent and "lbs/1000sq ft" in parent.text:
-                            warm_value = parent.text.strip().split()[-2]  # Just the number, like "78"
-                        break
+                if detail_link:
+                    try:
+                        detail_response = requests.get(detail_link, headers={"User-Agent": "Mozilla/5.0"})
+                        detail_soup = BeautifulSoup(detail_response.text, "html.parser")
+                        detail_rows = detail_soup.find_all('tr')
+                        for drow in detail_rows:
+                            dcells = drow.find_all('td')
+                            if len(dcells) == 2 and "WarmSeasonGrsMaint" in dcells[0].text:
+                                warm_value = dcells[1].text.strip()
+                                break
+                    except Exception as e:
+                        warm_value = f"Error: {e}"
 
-                records.append({
-                    "Lab Number": labnum,
-                    "Report URL": url,
-                    "WarmSeasonGrsMaint": warm_value
-                })
-
+                soil_data["WarmSeasonGrsMaint"] = warm_value
+                records.append(soil_data)
                 time.sleep(0.5)
 
             df = pd.DataFrame(records)
-            st.success("🎉 Scraping complete!")
+            st.success("✅ Scraping complete!")
             st.dataframe(df)
-
-            st.download_button(
-                label="📥 Download CSV",
-                data=df.to_csv(index=False),
-                file_name="clemson_soil_reports.csv",
-                mime="text/csv"
-            )
+            st.download_button("📥 Download CSV", df.to_csv(index=False), "clemson_soil_data.csv")
 
         except Exception as e:
-            st.error(f"❌ Scraping failed: {e}")
+            st.error(f"❌ Error during scraping: {e}")
