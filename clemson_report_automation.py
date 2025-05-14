@@ -3,34 +3,36 @@ import requests
 from bs4 import BeautifulSoup
 import pandas as pd
 import time
+from urllib.parse import urljoin
 
 st.set_page_config(page_title="Clemson Soil Report Scraper", layout="wide")
 
 st.title("🌱 Clemson Soil Report Scraper")
 st.markdown("Scrapes **`WarmSeasonGrsMaint`** data from Clemson's soil test reports.")
 
-# Main URL of the soil results
+# Define base and full page URL
 base_url = "https://psaweb.clemson.edu"
-main_url = base_url + "/soils/aspx/results.aspx?qs=1&LabNumA=25050901&LabNumB=25050930&DateA=&DateB=&Name=&UserName=AGSRVLB&AdminAuth=0&submit=SEARCH"
+main_url = urljoin(base_url, "/soils/aspx/results.aspx?qs=1&LabNumA=25050901&LabNumB=25050930&DateA=&DateB=&Name=&UserName=AGSRVLB&AdminAuth=0&submit=SEARCH")
 
-# Streamlit button to trigger scraping
 if st.button("Start Scraping"):
     with st.spinner("Scraping Clemson soil lab reports..."):
-        records = []  # Define this outside try block
+        records = []  # Initialize the list before try block
 
         try:
-            # Step 1: Load the results table
+            # Step 1: Load the results list
             main_response = requests.get(main_url, headers={"User-Agent": "Mozilla/5.0"})
             soup = BeautifulSoup(main_response.text, "html.parser")
 
+            # Step 2: Extract all valid lab links
             lab_links = []
             for a in soup.find_all('a', href=True):
                 if "standardreport.aspx" in a['href']:
-                    lab_links.append((a.text.strip(), base_url + a['href']))
+                    full_link = urljoin(base_url, a['href'])
+                    lab_links.append((a.text.strip(), full_link))
 
-            st.write(f"✅ Found {len(lab_links)} lab reports to process.")
+            st.success(f"✅ Found {len(lab_links)} lab reports to process.")
 
-            # Step 2: Loop through each lab report link and extract values
+            # Step 3: Visit each lab link and extract WarmSeasonGrsMaint
             for labnum, url in lab_links:
                 r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
                 rsoup = BeautifulSoup(r.text, "html.parser")
@@ -52,14 +54,14 @@ if st.button("Start Scraping"):
                     "WarmSeasonGrsMaint": value
                 })
 
-                time.sleep(0.5)  # Be kind to the server
+                time.sleep(0.5)  # Throttle requests
 
-            # Step 3: Display the results
+            # Step 4: Show results
             df = pd.DataFrame(records)
             st.success("🎉 Scraping complete!")
             st.dataframe(df)
 
-            # Download button
+            # Step 5: Allow download
             st.download_button(
                 label="📥 Download CSV",
                 data=df.to_csv(index=False),
