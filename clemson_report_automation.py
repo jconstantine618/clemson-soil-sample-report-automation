@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import time
 from urllib.parse import urljoin
-import re  # for extracting digits from sample number
+import re
 
 st.set_page_config(page_title="Clemson Soil Report Scraper", layout="wide")
 st.title("🌱 Clemson Soil Report Scraper")
@@ -20,10 +20,25 @@ if st.button("Start Scraping"):
         try:
             response = requests.get(main_url, headers={"User-Agent": "Mozilla/5.0"})
             soup = BeautifulSoup(response.text, "html.parser")
-            table = soup.find("table")
-            rows = table.find_all("tr")[1:]  # Skip header row
 
-            for row in rows:
+            # DEBUG: Show the entire HTML (uncomment if needed)
+            # st.code(response.text[:3000], language='html')
+
+            table = soup.find("table")
+            if not table:
+                st.error("❌ Could not find the table on the results page.")
+                st.stop()
+
+            rows = table.find_all("tr")
+            st.write(f"🔍 Found {len(rows) - 1} data rows (excluding header).")
+
+            if len(rows) <= 1:
+                st.error("❌ No data rows found. The table structure may have changed or is blocked.")
+                st.stop()
+
+            st.write("🧪 First row contents:", rows[1].text)
+
+            for row in rows[1:]:
                 cells = row.find_all("td")
                 if len(cells) < 20:
                     continue
@@ -31,7 +46,7 @@ if st.button("Start Scraping"):
                 name = cells[0].text.strip()
                 date_sampled = cells[1].text.strip()
                 sample_no = cells[2].text.strip()
-                account_number = re.sub(r"\D", "", sample_no)  # ✅ Extract digits only
+                account_number = re.sub(r"\D", "", sample_no)
                 lab_num = cells[3].text.strip()
                 detail_link = urljoin(base_url, cells[3].find("a")["href"]) if cells[3].find("a") else ""
 
@@ -60,7 +75,7 @@ if st.button("Start Scraping"):
                     "Bulk Density (lbs/A)": cells[19].text.strip()
                 }
 
-                # Scrape WarmSeasonGrsMaint value from detail report
+                # Try to extract WarmSeasonGrsMaint from the linked detail page
                 warm_value = ""
                 if detail_link:
                     try:
@@ -80,9 +95,12 @@ if st.button("Start Scraping"):
                 time.sleep(0.5)
 
             df = pd.DataFrame(records)
-            st.success("✅ Scraping complete!")
-            st.dataframe(df)
-            st.download_button("📥 Download CSV", df.to_csv(index=False), "clemson_soil_data.csv")
+            if df.empty:
+                st.warning("⚠️ Scraping completed, but no rows were added. Double-check parsing logic or site access.")
+            else:
+                st.success("✅ Scraping complete!")
+                st.dataframe(df)
+                st.download_button("📥 Download CSV", df.to_csv(index=False), "clemson_soil_data.csv")
 
         except Exception as e:
             st.error(f"❌ Error during scraping: {e}")
