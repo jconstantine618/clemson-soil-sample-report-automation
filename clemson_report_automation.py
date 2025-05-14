@@ -21,12 +21,16 @@ if st.button("Start Scraping"):
             response = requests.get(main_url, headers={"User-Agent": "Mozilla/5.0"})
             soup = BeautifulSoup(response.text, "html.parser")
 
-            # DEBUG: Show the entire HTML (uncomment if needed)
-            # st.code(response.text[:3000], language='html')
+            # Find the correct table based on expected column headers
+            tables = soup.find_all("table")
+            table = None
+            for t in tables:
+                if "Sample No" in t.text and "Soil pH" in t.text and "Buffer pH" in t.text:
+                    table = t
+                    break
 
-            table = soup.find("table")
             if not table:
-                st.error("❌ Could not find the table on the results page.")
+                st.error("❌ Could not find the soil test data table. The site may have blocked us or changed layout.")
                 st.stop()
 
             rows = table.find_all("tr")
@@ -36,7 +40,7 @@ if st.button("Start Scraping"):
                 st.error("❌ No data rows found. The table structure may have changed or is blocked.")
                 st.stop()
 
-            st.write("🧪 First row contents:", rows[1].text)
+            st.write("🧪 First row contents:", rows[1].text.strip())
 
             for row in rows[1:]:
                 cells = row.find_all("td")
@@ -75,7 +79,7 @@ if st.button("Start Scraping"):
                     "Bulk Density (lbs/A)": cells[19].text.strip()
                 }
 
-                # Try to extract WarmSeasonGrsMaint from the linked detail page
+                # Scrape WarmSeasonGrsMaint from detail page
                 warm_value = ""
                 if detail_link:
                     try:
