@@ -2,20 +2,24 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
+import time
 
-st.set_page_config(page_title="Clemson Soil Scraper", layout="wide")
+st.set_page_config(page_title="Clemson Soil Report Scraper", layout="wide")
 
 st.title("🌱 Clemson Soil Report Scraper")
-st.write("Scrapes `WarmSeasonGrsMaint` data from Clemson's soil test reports.")
+st.markdown("Scrapes **`WarmSeasonGrsMaint`** data from Clemson's soil test reports.")
 
-# Main URL
+# Main URL of the soil results
 base_url = "https://psaweb.clemson.edu"
 main_url = base_url + "/soils/aspx/results.aspx?qs=1&LabNumA=25050901&LabNumB=25050930&DateA=&DateB=&Name=&UserName=AGSRVLB&AdminAuth=0&submit=SEARCH"
 
-# Scrape when button is pressed
+# Streamlit button to trigger scraping
 if st.button("Start Scraping"):
-    with st.spinner("Scraping lab reports..."):
+    with st.spinner("Scraping Clemson soil lab reports..."):
+        records = []  # Define this outside try block
+
         try:
+            # Step 1: Load the results table
             main_response = requests.get(main_url, headers={"User-Agent": "Mozilla/5.0"})
             soup = BeautifulSoup(main_response.text, "html.parser")
 
@@ -24,13 +28,16 @@ if st.button("Start Scraping"):
                 if "standardreport.aspx" in a['href']:
                     lab_links.append((a.text.strip(), base_url + a['href']))
 
-            records = []
+            st.write(f"✅ Found {len(lab_links)} lab reports to process.")
+
+            # Step 2: Loop through each lab report link and extract values
             for labnum, url in lab_links:
                 r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
                 rsoup = BeautifulSoup(r.text, "html.parser")
 
                 text_blocks = rsoup.find_all(text=True)
                 value = ""
+
                 for i, t in enumerate(text_blocks):
                     if "WarmSeasonGrsMaint" in t:
                         for j in range(i, i + 5):
@@ -45,14 +52,20 @@ if st.button("Start Scraping"):
                     "WarmSeasonGrsMaint": value
                 })
 
-            df = pd.DataFrame(records)
-            st.success("Scraping complete!")
-            st.dataframe(df)
-            st.download_button("Download CSV", df.to_csv(index=False), file_name="clemson_reports.csv")
-        except Exception as e:
-            st.error(f"Scraping failed: {e}")
+                time.sleep(0.5)  # Be kind to the server
 
-# Step 3: Save to CSV
-df = pd.DataFrame(records)
-df.to_csv("clemson_soil_reports.csv", index=False)
-print("Data saved to clemson_soil_reports.csv")
+            # Step 3: Display the results
+            df = pd.DataFrame(records)
+            st.success("🎉 Scraping complete!")
+            st.dataframe(df)
+
+            # Download button
+            st.download_button(
+                label="📥 Download CSV",
+                data=df.to_csv(index=False),
+                file_name="clemson_soil_reports.csv",
+                mime="text/csv"
+            )
+
+        except Exception as e:
+            st.error(f"❌ Scraping failed: {e}")
