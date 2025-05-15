@@ -2,28 +2,61 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
-import time, re
+import time
+import re
 from urllib.parse import urljoin
 
 st.set_page_config(page_title="Clemson Soil + Lime Calculator", layout="wide")
 st.title("🌱 Clemson Soil Report Scraper + Lime Calculator")
 st.markdown(
-    "Enter a Clemson **results.aspx** URL and scrap soil pH, buffer pH, crop type, "
-    "the lab’s WarmSeasonGrsMaint lime rate, plus a calculated rate via Adams–Evans."
+    """
+    1. Paste your Clemson **results.aspx** URL below.  
+    2. App will scrape soil pH, buffer pH, crop type,  
+       and the lab’s printed lime rate (lbs/1 000 ft²).  
+    3. It will also compute your own lime rate using Adams–Evans +  
+       purity, depth, and split‐application adjustments.  
+    """
 )
 
-# 1) URL input
+# ────────────────────────────────────────────────────────────────────────────────
+#  User inputs
+# ────────────────────────────────────────────────────────────────────────────────
 results_url = st.text_input(
     "Results page URL",
-    "https://psaweb.clemson.edu/soils/aspx/results.aspx?"
-    "qs=1&LabNumA=25050901&LabNumB=25050930&DateA=&DateB=&Name=&"
-    "UserName=AGSRVLB&AdminAuth=0&submit=SEARCH"
+    value=(
+        "https://psaweb.clemson.edu/soils/aspx/results.aspx?"
+        "qs=1&LabNumA=25050901&LabNumB=25050930"
+        "&DateA=&DateB=&Name=&UserName=AGSRVLB"
+        "&AdminAuth=0&submit=SEARCH"
+    ),
+    help="Paste the full URL that lists your LabNum range or date range."
 )
 
-# 2) Helpers --------------------------------------------------
+cce_pct = st.number_input(
+    "Lime purity (CCE %)",
+    min_value=50.0, max_value=120.0, value=100.0, step=1.0,
+    help="Neutralizing value of your lime product (100 % = pure CaCO₃)."
+)
 
+depth_in = st.number_input(
+    "Mixing depth (inches)",
+    min_value=1.0, max_value=12.0, value=4.0, step=1.0,
+    help="Depth you intend to incorporate lime into the soil."
+)
+
+split_app = st.checkbox(
+    "Split into two applications",
+    value=True,
+    help="If checked, total rate will be split into two passes (spring/fall)."
+)
+
+# ────────────────────────────────────────────────────────────────────────────────
+#  Helper functions
+# ────────────────────────────────────────────────────────────────────────────────
 def extract_lime_and_crop(html: str):
-    """Returns (crop_key, printed_lime_lbs) from the Recommendations table."""
+    """
+    Returns (crop_key, printed_lime_lbs) from the Recommendations table.
+    """
     soup = BeautifulSoup(html, "html.parser")
     rec_label = soup.find(string=re.compile(r"Recommendations", re.I))
     if not rec_label:
@@ -33,87 +66,113 @@ def extract_lime_and_crop(html: str):
         return None, None
 
     crop_key = None
-    printed = None
+    printed_lime = None
 
     for tr in rec_tbl.find_all("tr"):
         cells = tr.find_all(["td","th"])
-        text0 = cells[0].get_text(strip=True)
-        # find the Warm/Cool/Centipede row
-        if "WarmSeasonGrsMaint" in text0 or "CoolSeasonGrsMaint" in text0 or "Centipede" in text0:
-            crop_key = text0
-            # extract the number from the next cell
+        txt = cells[0].get_text(strip=True)
+        if any(term in txt for term in ["WarmSeasonGrsMaint","CoolSeasonGrsMaint","Centipede"]):
+            crop_key = txt
             if len(cells) > 1:
                 m = re.search(r"(\d+)", cells[1].get_text())
-                printed = int(m.group(1)) if m else None
+                printed_lime = int(m.group(1)) if m else None
             break
-    return crop_key, printed
 
-def calc_adams_evans(buffer_pH: float, soil_pH: float, target_pH: float) -> int:
-    """
-    LR tons/acre = [0.6 + (6.6 - buffer_pH)] * (target_pH - soil_pH)
-    Convert to lbs/1k ft²: *2000 (lb/ton) /43.56
-    """
-    df = target_pH - soil_pH
-    if df <= 0:
-        return 0
-    tons_per_acre = (0.6 + (6.6 - buffer_pH)) * df
-    lbs_1000 = round(tons_per_acre * 2000 / 43.56)
-    return max(lbs_1000, 0)
+    return crop_key, printed_lime
 
 def target_pH_from_crop(crop_key: str) -> float:
-    ck = crop_key.lower()
+    """Map crop type to Clemson target pH."""
+    ck = (crop_key or "").lower()
     if "coolseason" in ck:
         return 6.2
     if "warmseason" in ck:
         return 6.0
     if "centipede" in ck:
         return 5.5
-    # default fallback
-    return 6.2
+    return 6.2  # fallback
 
-# 3) Main scrape + compute -----------------------------------
+def calc_adams_evans(buffer_pH: float, soil_pH: float, target_pH: float,
+                     cce_frac: float, depth: float, split: bool) -> int:
+    """
+    Compute lime (lbs/1 000 ft²) via:
+      1) Adams–Evans tons/acre
+      2) Convert to lbs/1 000 ft²
+      3) Adjust for CCE (purity)
+      4) Adjust for mixing depth & split
+    """
+    # 1) Adams–Evans in tons/acre
+    delta = target_pH - soil_pH
+    if delta <= 0:
+        return 0
+    tons_acre = (0.6 + (6.6 - buffer_pH)) * delta
+
+    # 2) tons→lb/1 000 ft²
+    lb_1000 = tons_acre * 2000.0 / 43.56
+
+    # 3) purity adjustment
+    lb_adj = lb_1000 / cce_frac
+
+    # 4) depth & split
+    depth_factor = depth / 8.0
+    split_factor = 0.5 if split else 1.0
+    final = round(lb_adj * depth_factor * split_factor)
+    return max(final, 0)
+
+# ────────────────────────────────────────────────────────────────────────────────
+#  Main scraping & calculation
+# ────────────────────────────────────────────────────────────────────────────────
 if st.button("Start Scraping"):
-    if not results_url:
-        st.error("Please enter a results.aspx URL above.")
+    if not results_url.strip():
+        st.error("Please enter a valid results.aspx URL above.")
     else:
-        with st.spinner("Scraping summary and computing lime…"):
-            records=[]
+        with st.spinner("Scraping summary and computing lime rates…"):
+            records = []
             try:
-                # Summary page
-                r = requests.get(results_url, headers={"User-Agent":"Mozilla/5.0"})
-                r.raise_for_status()
-                summary_soup = BeautifulSoup(r.text, "html.parser")
+                # fetch summary page
+                main_resp = requests.get(results_url, headers={"User-Agent":"Mozilla/5.0"})
+                main_resp.raise_for_status()
+                main_soup = BeautifulSoup(main_resp.text, "html.parser")
 
-                # Locate the table with "Sample No" + "Soil pH"
+                # find the summary table
                 summary_tbl = next(
-                    (t for t in summary_soup.find_all("table")
-                     if "Sample No" in t.get_text() and "Soil pH" in t.get_text()),
+                    (
+                        t for t in main_soup.find_all("table")
+                        if "Sample No" in t.get_text() and "Soil pH" in t.get_text()
+                    ),
                     None
                 )
                 if not summary_tbl:
-                    st.error("Could not find the summary table.")
+                    st.error("Could not find the main results table.")
                     st.stop()
 
-                for tr in summary_tbl.find_all("tr")[1:]:
-                    td = tr.find_all("td")
-                    if len(td) < 6:
+                # loop rows
+                for row in summary_tbl.find_all("tr")[1:]:
+                    cols = row.find_all("td")
+                    if len(cols) < 6:
                         continue
 
-                    sample_no  = td[2].get_text(strip=True)
-                    account    = re.sub(r"\D","", sample_no)
-                    labnum     = td[3].get_text(strip=True)
-                    date_s     = td[1].get_text(strip=True)
-                    soil_pH     = float(td[4].get_text(strip=True))
-                    buffer_pH   = float(td[5].get_text(strip=True))
+                    sample_no = cols[2].get_text(strip=True)
+                    account   = re.sub(r"\D","", sample_no)
+                    labnum    = cols[3].get_text(strip=True)
+                    date_s    = cols[1].get_text(strip=True)
+                    soil_pH   = float(cols[4].get_text(strip=True))
+                    buffer_pH = float(cols[5].get_text(strip=True))
 
-                    href       = td[3].find("a")["href"]
+                    # detail page
+                    href       = cols[3].find("a")["href"]
                     detail_url = urljoin(results_url, href)
-                    d = requests.get(detail_url, headers={"User-Agent":"Mozilla/5.0"})
-                    d.raise_for_status()
+                    dresp      = requests.get(detail_url, headers={"User-Agent":"Mozilla/5.0"})
+                    dresp.raise_for_status()
 
-                    crop_key, printed_lime = extract_lime_and_crop(d.text)
-                    targ = target_pH_from_crop(crop_key or "")
-                    calc_lime = calc_adams_evans(buffer_pH, soil_pH, targ)
+                    # extract lab’s printed rate & crop
+                    crop_key, printed = extract_lime_and_crop(dresp.text)
+                    target      = target_pH_from_crop(crop_key)
+                    cce_fraction = cce_pct / 100.0
+
+                    calculated = calc_adams_evans(
+                        buffer_pH, soil_pH, target,
+                        cce_fraction, depth_in, split_app
+                    )
 
                     records.append({
                         "Account": account,
@@ -122,21 +181,22 @@ if st.button("Start Scraping"):
                         "Date": date_s,
                         "Soil pH": soil_pH,
                         "Buffer pH": buffer_pH,
-                        "Crop Key": crop_key,
-                        "Target pH": targ,
-                        "Printed Lime (lbs/1k ft²)": printed_lime,
-                        "Calc Lime  (lbs/1k ft²)": calc_lime,
+                        "Crop": crop_key,
+                        "Target pH": target,
+                        "Lab Lime (lbs/1k ft²)": printed,
+                        "Calc Lime(lbs/1k ft²)": calculated,
                     })
-                    time.sleep(0.3)
+                    time.sleep(0.25)
 
                 df = pd.DataFrame(records)
-                st.success("✅ Done!")
+                st.success("✅ All done!")
                 st.dataframe(df)
                 st.download_button(
                     "📥 Download CSV",
-                    df.to_csv(index=False),
-                    "soil_lime_results.csv",
-                    mime="text/csv",
+                    data=df.to_csv(index=False),
+                    file_name="soil_lime_results.csv",
+                    mime="text/csv"
                 )
+
             except Exception as e:
-                st.error(f"Error fetching data: {e}")
+                st.error(f"Error fetching or parsing data: {e}")
