@@ -2,8 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, parse_qs, urlunparse, urlencode
-import re
+from urllib.parse import urlparse, parse_qs
 import base64
 import time
 
@@ -13,19 +12,53 @@ def get_table_download_link(df):
     b64 = base64.b64encode(csv.encode()).decode()
     return f'<a href="data:file/csv;base64,{b64}" download="clemson_soil_report_data.csv">Download CSV file</a>'
 
-# Function to find a value in the soup by its label
-def find_value_by_label(soup, label_text):
+# A more robust function to find a value within the main analysis table
+def get_analysis_data(table):
+    data = {}
+    if not table:
+        return data
     try:
-        # Find the 'th' or 'td' element containing the label text
-        label_element = soup.find(lambda tag: tag.name in ['th', 'td'] and label_text in tag.get_text())
-        if label_element:
-            # The value is usually in the next 'td' sibling element
-            value_element = label_element.find_next_sibling('td')
-            if value_element:
-                return value_element.text.strip()
+        # Iterate over each row in the table body
+        for row in table.find('tbody').find_all('tr'):
+            header = row.find('th')
+            if header:
+                label = header.text.strip()
+                value_cell = header.find_next_sibling('td')
+                if value_cell:
+                    # Map the label found on the page to the column name we want
+                    if "Soil pH" in label:
+                        data['Soil pH'] = value_cell.text.strip()
+                    elif "Buffer pH" in label:
+                        data['Buffer pH'] = value_cell.text.strip()
+                    elif "Phosphorus (P)" in label:
+                        data['P (lbs/A)'] = value_cell.text.strip()
+                    elif "Potassium (K)" in label:
+                        data['K (lbs/A)'] = value_cell.text.strip()
+                    elif "Calcium (Ca)" in label:
+                        data['Ca (lbs/A)'] = value_cell.text.strip()
+                    elif "Magnesium (Mg)" in label:
+                        data['Mg (lbs/A)'] = value_cell.text.strip()
+                    elif "Zinc (Zn)" in label:
+                        data['Zn (lbs/A)'] = value_cell.text.strip()
+                    elif "Manganese (Mn)" in label:
+                        data['Mn (lbs/A)'] = value_cell.text.strip()
+                    elif "Copper (Cu)" in label:
+                        data['Cu (lbs/A)'] = value_cell.text.strip()
+                    elif "Boron (B)" in label:
+                        data['B (lbs/A)'] = value_cell.text.strip()
+                    elif "Sodium (Na)" in label:
+                        data['Na (lbs/A)'] = value_cell.text.strip()
+                    elif "Sulfur (S)" in label:
+                        data['S (lbs/A)'] = value_cell.text.strip()
+                    elif "Soluble Salts" in label:
+                        data['EC (mmhos/cm)'] = value_cell.text.strip()
+                    elif "Nitrate Nitrogen" in label:
+                        data['NO3-N (ppm)'] = value_cell.text.strip()
+                    elif "Organic Matter" in label:
+                        data['OM (%)'] = value_cell.text.strip()
     except Exception as e:
-        st.warning(f"Could not find value for label '{label_text}': {e}")
-    return "N/A"
+        st.warning(f"Could not parse analysis table: {e}")
+    return data
 
 # Function to scrape a single report
 def scrape_report(url, existing_df):
@@ -39,75 +72,49 @@ def scrape_report(url, existing_df):
         query_params = parse_qs(parsed_url.query)
         lab_num = query_params.get('id', [None])[0]
 
-        # Check for duplicates in the DataFrame
         if lab_num and 'LabNum' in existing_df.columns and int(lab_num) in existing_df['LabNum'].values:
             st.warning(f"Skipping duplicate report for LabNum: {lab_num}")
             return None
 
-        # --- EXTRACTING DATA ---
-        soil_ph = find_value_by_label(soup, "Soil pH")
-        buffer_ph = find_value_by_label(soup, "Buffer pH")
-        phosphorus = find_value_by_label(soup, "Phosphorus (P)")
-        potassium = find_value_by_label(soup, "Potassium (K)")
-        calcium = find_value_by_label(soup, "Calcium (Ca)")
-        magnesium = find_value_by_label(soup, "Magnesium (Mg)")
-        zinc = find_value_by_label(soup, "Zinc (Zn)")
-        manganese = find_value_by_label(soup, "Manganese (Mn)")
-        copper = find_value_by_label(soup, "Copper (Cu)")
-        boron = find_value_by_label(soup, "Boron (B)")
-        sodium = find_value_by_label(soup, "Sodium (Na)")
-        sulfur = find_value_by_label(soup, "Sulfur (S)")
-        ec = find_value_by_label(soup, "Soluble Salts")
-        no3_n = find_value_by_label(soup, "Nitrate Nitrogen")
-        om = find_value_by_label(soup, "Organic Matter")
-        bulk_density = "N/A" # Assuming Bulk Density is not on the standard report
-
-        # --- CROP TYPE ---
-        crop_type = "None"
+        # --- Isolate Tables ---
+        analysis_table = soup.find('table', id='tblAnalysis')
         recommendations_table = soup.find('table', summary='Recommendations')
-        if recommendations_table:
-            rows = recommendations_table.find('tbody').find_all('tr')
-            # The data is in the second row (index 1), the first row (index 0) is the header.
-            if len(rows) > 1:
-                # Find all 'td' (table data) elements in the second row
-                data_cols = rows[1].find_all('td')
-                if len(data_cols) > 0:
-                    # The crop type is in the first column (index 0) of that data row
-                    crop_type = data_cols[0].text.strip()
 
-        # --- LIME RECOMMENDATION ---
+        # --- EXTRACT DATA ---
+        report_data = get_analysis_data(analysis_table)
+        report_data['LabNum'] = int(lab_num) if lab_num else None
+
+        # --- CROP TYPE & LIME ---
+        crop_type = "None"
         lime_recommendation = "N/A"
         if recommendations_table:
-            rows = recommendations_table.find_all('tr')
-            if len(rows) > 1:
-                # Lime is in the second column of the second row
-                cols = rows[1].find_all('td')
-                if len(cols) > 1:
-                    lime_recommendation = cols[1].text.strip()
+            rec_rows = recommendations_table.find('tbody').find_all('tr')
+            # Data is in the second row (index 1)
+            if len(rec_rows) > 1:
+                rec_cols = rec_rows[1].find_all('td')
+                # Crop Type is in the first column
+                if len(rec_cols) > 0:
+                    crop_type = rec_cols[0].text.strip()
+                # Lime is in the second column
+                if len(rec_cols) > 1:
+                    lime_recommendation = rec_cols[1].text.strip()
+
+        report_data['Crop Type'] = crop_type
+        report_data['Lime (lbs/1,000 ft² or /A)'] = lime_recommendation
+        report_data['Bulk Density (lbs/A)'] = "N/A" # Not on standard report
+
+        # Define all expected columns to ensure consistent DataFrame structure
+        all_columns = [
+            'LabNum', 'Soil pH', 'Buffer pH', 'P (lbs/A)', 'K (lbs/A)', 'Ca (lbs/A)',
+            'Mg (lbs/A)', 'Zn (lbs/A)', 'Mn (lbs/A)', 'Cu (lbs/A)', 'B (lbs/A)',
+            'Na (lbs/A)', 'S (lbs/A)', 'EC (mmhos/cm)', 'NO3-N (ppm)', 'OM (%)',
+            'Bulk Density (lbs/A)', 'Crop Type', 'Lime (lbs/1,000 ft² or /A)'
+        ]
         
-        # Create a dictionary with the scraped data
-        new_row_data = {
-            'LabNum': int(lab_num) if lab_num else None,
-            'Soil pH': soil_ph,
-            'Buffer pH': buffer_ph,
-            'P (lbs/A)': phosphorus,
-            'K (lbs/A)': potassium,
-            'Ca (lbs/A)': calcium,
-            'Mg (lbs/A)': magnesium,
-            'Zn (lbs/A)': zinc,
-            'Mn (lbs/A)': manganese,
-            'Cu (lbs/A)': copper,
-            'B (lbs/A)': boron,
-            'Na (lbs/A)': sodium,
-            'S (lbs/A)': sulfur,
-            'EC (mmhos/cm)': ec,
-            'NO3-N (ppm)': no3_n,
-            'OM (%)': om,
-            'Bulk Density (lbs/A)': bulk_density,
-            'Crop Type': crop_type,
-            'Lime (lbs/1,000 ft² or /A)': lime_recommendation
-        }
-        return new_row_data
+        # Ensure all columns are present, filling missing ones with N/A
+        final_data = {col: report_data.get(col, 'N/A') for col in all_columns}
+        
+        return final_data
 
     except requests.exceptions.RequestException as e:
         st.error(f"Error fetching URL {url}: {e}")
@@ -129,7 +136,6 @@ if 'scraped_data' not in st.session_state:
 if 'scraping_done' not in st.session_state:
     st.session_state.scraping_done = False
 
-# Input URL
 results_page_url = st.text_input("Results page URL", "https://psaweb.clemson.edu/soils/aspx/results.aspx?qs=1&LabNumA=25050901&LabNumB=25050930&DateA=&DateB=&Name=&UserName=AGSRVLB&AdminAuth=0&submit=SEARCH")
 
 if st.button("Start Scraping", key='start_scraping'):
@@ -142,7 +148,6 @@ if st.button("Start Scraping", key='start_scraping'):
                 main_page.raise_for_status()
                 main_soup = BeautifulSoup(main_page.content, "html.parser")
                 
-                # Find all hyperlinks that lead to a standardreport.aspx page
                 report_links = main_soup.find_all('a', href=lambda href: href and 'standardreport.aspx' in href)
 
                 if not report_links:
@@ -153,31 +158,24 @@ if st.button("Start Scraping", key='start_scraping'):
                     all_data = []
                     progress_bar = st.progress(0)
 
-                    # Create a new DataFrame for this scraping session
                     temp_df = st.session_state.scraped_data.copy()
 
                     for i, link in enumerate(report_links):
                         report_path = link['href']
-                        # Construct the full URL
                         full_report_url = f"https://psaweb.clemson.edu/soils/aspx/{report_path}"
                         
-                        # Scrape the report
                         report_data = scrape_report(full_report_url, temp_df)
                         
                         if report_data:
                             all_data.append(report_data)
-                            # Add new data to the temp_df to check for duplicates within the same run
                             new_df_row = pd.DataFrame([report_data])
                             temp_df = pd.concat([temp_df, new_df_row], ignore_index=True)
 
-                        # Update progress bar
                         progress_bar.progress((i + 1) / len(report_links))
-                        time.sleep(0.1) # Small delay to be polite to the server
+                        time.sleep(0.1)
                     
-                    # Convert the list of dictionaries to a DataFrame
                     if all_data:
                         new_data_df = pd.DataFrame(all_data)
-                        # Concatenate with existing data in session state
                         st.session_state.scraped_data = pd.concat([st.session_state.scraped_data, new_data_df], ignore_index=True).drop_duplicates(subset=['LabNum']).sort_values(by='LabNum').reset_index(drop=True)
 
                     st.session_state.scraping_done = True
@@ -193,7 +191,14 @@ if st.session_state.scraping_done:
 if not st.session_state.scraped_data.empty:
     st.markdown("---")
     st.subheader("Scraped Data")
-    st.dataframe(st.session_state.scraped_data)
+    # Ensure column order is correct for display
+    display_columns = [
+        'LabNum', 'Soil pH', 'Buffer pH', 'P (lbs/A)', 'K (lbs/A)', 'Ca (lbs/A)',
+        'Mg (lbs/A)', 'Zn (lbs/A)', 'Mn (lbs/A)', 'Cu (lbs/A)', 'B (lbs/A)',
+        'Na (lbs/A)', 'S (lbs/A)', 'EC (mmhos/cm)', 'NO3-N (ppm)', 'OM (%)',
+        'Bulk Density (lbs/A)', 'Crop Type', 'Lime (lbs/1,000 ft² or /A)'
+    ]
+    st.dataframe(st.session_state.scraped_data[display_columns])
     st.markdown(get_table_download_link(st.session_state.scraped_data), unsafe_allow_html=True)
     if st.button("Clear All Data"):
         st.session_state.scraped_data = pd.DataFrame()
