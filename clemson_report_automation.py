@@ -136,10 +136,13 @@ if st.button("Start Scraping", key='start_scraping'):
     else:
         try:
             # STEP 1: Use Selenium to get a valid session and cookies
-            with st.spinner('Initializing...'):
+            with st.spinner('Initializing browser to establish a session...'):
                 driver = get_driver()
                 driver.get(results_page_url)
+                # Wait for links to appear to ensure the session is active
                 WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, "View Report")))
+                
+                # Get links and cookies from the driver
                 main_soup = BeautifulSoup(driver.page_source, "html.parser")
                 report_links = [a['href'] for a in main_soup.find_all('a', href=lambda h: h and 'standardreport.aspx' in h)]
                 selenium_cookies = driver.get_cookies()
@@ -169,8 +172,24 @@ if st.button("Start Scraping", key='start_scraping'):
                     report_data = scrape_report_with_requests(req_session, full_report_url)
                     if report_data:
                         all_data.append(report_data)
-                    time.sleep(0.2) # Add a small delay between requests to be polite to the server
+                    time.sleep(0.2)
                     
                     progress_bar.progress((i + 1) / len(report_links), text=f"Fetched report {i+1}/{len(report_links)}")
                 
-                if all_.
+                if all_data:
+                    new_df = pd.DataFrame(all_data)
+                    st.session_state.scraped_data = pd.concat([st.session_state.scraped_data, new_df], ignore_index=True).drop_duplicates(subset=['LabNum']).sort_values(by='LabNum').reset_index(drop=True)
+                
+                st.success("Extraction complete! 🎉")
+
+        except Exception as e:
+            st.error(f"A critical error occurred during the scraping process: {e}")
+
+if not st.session_state.scraped_data.empty:
+    st.markdown("---")
+    st.subheader("Scraped Data")
+    st.dataframe(st.session_state.scraped_data)
+    st.markdown(get_table_download_link(st.session_state.scraped_data), unsafe_allow_html=True)
+    if st.button("Clear All Data"):
+        st.session_state.scraped_data = pd.DataFrame()
+        st.rerun()
