@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import time
 import base64
+import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, parse_qs
 
@@ -78,16 +79,13 @@ def get_recommendation_data(table):
             st.warning(f"Could not parse recommendations table: {e}")
     return crop_type, lime
 
-# --- Main Scraping Function ---
-def scrape_report(driver, url):
+# --- Main Scraping Function (using Requests)---
+def scrape_report_with_requests(session, url):
     try:
-        driver.get(url)
-        # Wait up to 15 seconds for the main analysis table to appear before proceeding
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.ID, "tblAnalysis"))
-        )
-        
-        soup = BeautifulSoup(driver.page_source, "html.parser")
+        response = session.get(url, timeout=10)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.content, "html.parser")
         parsed_url = urlparse(url)
         lab_num = parse_qs(parsed_url.query).get('id', [None])[0]
 
@@ -101,7 +99,6 @@ def scrape_report(driver, url):
         report_data['Crop Type'] = crop_type
         report_data['Lime (lbs/1,000 ft² or /A)'] = lime
         
-        # Ensure all columns are present for consistent data structure
         all_columns = [
             'LabNum', 'Soil pH', 'Buffer pH', 'P (lbs/A)', 'K (lbs/A)', 'Ca (lbs/A)',
             'Mg (lbs/A)', 'Zn (lbs/A)', 'Mn (lbs/A)', 'Cu (lbs/A)', 'B (lbs/A)',
@@ -111,7 +108,7 @@ def scrape_report(driver, url):
         return {col: report_data.get(col, 'N/A') for col in all_columns}
 
     except Exception as e:
-        st.error(f"Failed to scrape {url}: {e}")
+        st.error(f"Failed to scrape {url} with requests: {e}")
         return None
 
 # --- Helper for CSV Download ---
@@ -134,48 +131,58 @@ if st.button("Start Scraping", key='start_scraping'):
     if not results_page_url:
         st.warning("Please enter a URL.")
     else:
-        with st.spinner('Initializing browser... This may take a moment the first time.'):
-            driver = get_driver()
+        all_data = []
+        progress_bar = st.progress(0, text="Initializing...")
         
-        with st.spinner("Scraping reports... Please wait."):
-            try:
+        try:
+            # STEP 1: Use Selenium to get a valid session and cookies
+            with st.spinner('Initializing browser to establish a session...'):
+                driver = get_driver()
                 driver.get(results_page_url)
-                WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((By.TAG_NAME, "a"))
-                )
+                # Wait for links to appear to ensure the session is active
+                WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, "View Report")))
+                
+                # Get links and cookies from the driver
                 main_soup = BeautifulSoup(driver.page_source, "html.parser")
                 report_links = [a['href'] for a in main_soup.find_all('a', href=lambda h: h and 'standardreport.aspx' in h)]
-                
-                if not report_links:
-                    st.error("No report links found. Please check the URL.")
-                else:
-                    st.info(f"Found {len(report_links)} reports to scrape.")
-                    all_data = []
-                    progress_bar = st.progress(0, text="Scraping in progress...")
-                    
-                    # Use existing data to avoid re-scraping
-                    existing_labs = set(st.session_state.scraped_data['LabNum']) if 'LabNum' in st.session_state.scraped_data else set()
+                selenium_cookies = driver.get_cookies()
 
-                    for i, link_path in enumerate(report_links):
-                        full_report_url = f"https://psaweb.clemson.edu/soils/aspx/{link_path}"
-                        lab_num_str = parse_qs(urlparse(full_report_url).query).get('id', [None])[0]
-                        
-                        if lab_num_str and int(lab_num_str) in existing_labs:
-                            st.write(f"Skipping already scraped LabNum: {lab_num_str}")
-                        else:
-                            report_data = scrape_report(driver, full_report_url)
-                            if report_data:
-                                all_data.append(report_data)
-                        
-                        progress_bar.progress((i + 1) / len(report_links), text=f"Scraped report {i+1}/{len(report_links)}")
+            if not report_links:
+                st.error("No report links found. Please check the URL.")
+            else:
+                st.info(f"Found {len(report_links)} reports. Now fetching with a lightweight client...")
+                
+                # STEP 2: Use a lightweight Requests session with the cookies for the actual scraping
+                req_session = requests.Session()
+                # Transfer cookies from Selenium to Requests
+                for cookie in selenium_cookies:
+                    req_session.cookies.set(cookie['name'], cookie['value'], domain=cookie['domain'])
+                # Add a browser-like User-Agent
+                req_session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"})
+
+                existing_labs = set(st.session_state.scraped_data['LabNum']) if 'LabNum' in st.session_state.scraped_data.columns else set()
+
+                for i, link_path in enumerate(report_links):
+                    full_report_url = f"https://psaweb.clemson.edu/soils/aspx/{link_path}"
+                    lab_num_str = parse_qs(urlparse(full_report_url).query).get('id', [None])[0]
                     
-                    if all_data:
-                        new_df = pd.DataFrame(all_data)
-                        st.session_state.scraped_data = pd.concat([st.session_state.scraped_data, new_df], ignore_index=True).drop_duplicates(subset=['LabNum']).sort_values(by='LabNum').reset_index(drop=True)
+                    if lab_num_str and int(lab_num_str) in existing_labs:
+                        st.write(f"Skipping already scraped LabNum: {lab_num_str}")
+                    else:
+                        report_data = scrape_report_with_requests(req_session, full_report_url)
+                        if report_data:
+                            all_data.append(report_data)
                     
-                    st.success("Extraction complete!")
-            except Exception as e:
-                st.error(f"A critical error occurred: {e}")
+                    progress_bar.progress((i + 1) / len(report_links), text=f"Fetched report {i+1}/{len(report_links)}")
+                
+                if all_data:
+                    new_df = pd.DataFrame(all_data)
+                    st.session_state.scraped_data = pd.concat([st.session_state.scraped_data, new_df], ignore_index=True).drop_duplicates(subset=['LabNum']).sort_values(by='LabNum').reset_index(drop=True)
+                
+                st.success("Extraction complete! 🎉")
+
+        except Exception as e:
+            st.error(f"A critical error occurred: {e}")
 
 if not st.session_state.scraped_data.empty:
     st.markdown("---")
