@@ -1,145 +1,201 @@
 import streamlit as st
-import requests, re, time
-from bs4 import BeautifulSoup
 import pandas as pd
-from urllib.parse import urljoin, urlparse, parse_qs, urlencode
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse, parse_qs, urlunparse, urlencode
+import re
+import base64
+import time
 
-st.set_page_config(page_title="Clemson Soil Scraper – Full Data + Crop", layout="wide")
-st.title("🌱 Clemson Soil Report Scraper – Full Data + Crop Type")
+# Function to generate a download link for the DataFrame
+def get_table_download_link(df):
+    csv = df.to_csv(index=False)
+    b64 = base64.b64encode(csv.encode()).decode()
+    return f'<a href="data:file/csv;base64,{b64}" download="clemson_soil_report_data.csv">Download CSV file</a>'
 
-st.markdown(
-    "Paste any Clemson **results.aspx** URL (with your LabNum range or date range), "
-    "click **Start Scraping**, and get a CSV with full soil data **plus** the Crop type "
-    "and the lab’s lime recommendation."
-)
+# Function to find a value in the soup by its label
+def find_value_by_label(soup, label_text):
+    try:
+        # Find the 'th' or 'td' element containing the label text
+        label_element = soup.find(lambda tag: tag.name in ['th', 'td'] and label_text in tag.get_text())
+        if label_element:
+            # The value is usually in the next 'td' sibling element
+            value_element = label_element.find_next_sibling('td')
+            if value_element:
+                return value_element.text.strip()
+    except Exception as e:
+        st.warning(f"Could not find value for label '{label_text}': {e}")
+    return "N/A"
 
-results_url = st.text_input(
-    "Results page URL",
-    "https://psaweb.clemson.edu/soils/aspx/results.aspx?"
-    "qs=1&LabNumA=25050901&LabNumB=25050930&DateA=&DateB=&Name=&"
-    "UserName=AGSRVLB&AdminAuth=0&submit=SEARCH",
-)
+# Function to scrape a single report
+def scrape_report(url, existing_df):
+    try:
+        page = requests.get(url, timeout=10)
+        page.raise_for_status()
+        soup = BeautifulSoup(page.content, "html.parser")
 
-# ---------------------------------------------------------------------------
-def txt_url_from_href(base_results_url: str, href: str) -> str:
-    """
-    Clemson's Lab # link is something like
-    standardreport.aspx?key=...&pval=...&id=25050901
-    Add &format=txt to get the plain‑text report.
-    """
-    full = urljoin(base_results_url, href)
-    parsed = urlparse(full)
-    qs = parse_qs(parsed.query, keep_blank_values=True)
-    qs["format"] = ["txt"]
-    new_query = urlencode(qs, doseq=True)
-    return parsed._replace(query=new_query).geturl()
+        # Extract LabNum from URL to check for duplicates
+        parsed_url = urlparse(url)
+        query_params = parse_qs(parsed_url.query)
+        lab_num = query_params.get('id', [None])[0]
 
-def extract_crop_and_lime(txt: str):
-    """Return (crop_type, lime_lbs_1000) from plain‑text report."""
-    crop = None
-    lime = None
-    crop_match = re.search(r"^Crop\s*:\s*(.+)$", txt, re.MULTILINE)
-    if crop_match:
-        crop = crop_match.group(1).strip()
-    lime_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*lbs/1000", txt)
-    if lime_match:
-        lime = lime_match.group(1)
-    elif "no lime" in txt.lower():
-        lime = "None"
-    return crop, lime
+        # Check for duplicates in the DataFrame
+        if lab_num and 'LabNum' in existing_df.columns and int(lab_num) in existing_df['LabNum'].values:
+            st.warning(f"Skipping duplicate report for LabNum: {lab_num}")
+            return None
 
-# ---------------------------------------------------------------------------
-if st.button("Start Scraping"):
-    if not results_url.strip():
-        st.error("Please enter a valid results.aspx URL.")
-        st.stop()
+        # --- EXTRACTING DATA ---
+        soil_ph = find_value_by_label(soup, "Soil pH")
+        buffer_ph = find_value_by_label(soup, "Buffer pH")
+        phosphorus = find_value_by_label(soup, "Phosphorus (P)")
+        potassium = find_value_by_label(soup, "Potassium (K)")
+        calcium = find_value_by_label(soup, "Calcium (Ca)")
+        magnesium = find_value_by_label(soup, "Magnesium (Mg)")
+        zinc = find_value_by_label(soup, "Zinc (Zn)")
+        manganese = find_value_by_label(soup, "Manganese (Mn)")
+        copper = find_value_by_label(soup, "Copper (Cu)")
+        boron = find_value_by_label(soup, "Boron (B)")
+        sodium = find_value_by_label(soup, "Sodium (Na)")
+        sulfur = find_value_by_label(soup, "Sulfur (S)")
+        ec = find_value_by_label(soup, "Soluble Salts")
+        no3_n = find_value_by_label(soup, "Nitrate Nitrogen")
+        om = find_value_by_label(soup, "Organic Matter")
+        bulk_density = "N/A" # Assuming Bulk Density is not on the standard report
 
-    with st.spinner("Scraping Clemson soil reports…"):
-        session = requests.Session()
-        session.headers.update({"User-Agent": "Mozilla/5.0"})
-        try:
-            res = session.get(results_url, timeout=30)
-            res.raise_for_status()
-        except Exception as exc:
-            st.error(f"Failed to load results page: {exc}")
-            st.stop()
+        # --- CROP TYPE ---
+        crop_type = "None"
+        recommendations_table = soup.find('table', summary='Recommendations')
+        if recommendations_table:
+            rows = recommendations_table.find('tbody').find_all('tr')
+            # The data is in the second row (index 1), the first row (index 0) is the header.
+            if len(rows) > 1:
+                # Find all 'td' (table data) elements in the second row
+                data_cols = rows[1].find_all('td')
+                if len(data_cols) > 0:
+                    # The crop type is in the first column (index 0) of that data row
+                    crop_type = data_cols[0].text.strip()
 
-        soup = BeautifulSoup(res.text, "html.parser")
-        summary_tbl = next(
-            (t for t in soup.find_all("table")
-             if "Sample No" in t.get_text() and "Soil pH" in t.get_text()),
-            None
-        )
-        if not summary_tbl:
-            st.error("Could not find the main results table on that page.")
-            st.stop()
+        # --- LIME RECOMMENDATION ---
+        lime_recommendation = "N/A"
+        if recommendations_table:
+            rows = recommendations_table.find_all('tr')
+            if len(rows) > 1:
+                # Lime is in the second column of the second row
+                cols = rows[1].find_all('td')
+                if len(cols) > 1:
+                    lime_recommendation = cols[1].text.strip()
+        
+        # Create a dictionary with the scraped data
+        new_row_data = {
+            'LabNum': int(lab_num) if lab_num else None,
+            'Soil pH': soil_ph,
+            'Buffer pH': buffer_ph,
+            'P (lbs/A)': phosphorus,
+            'K (lbs/A)': potassium,
+            'Ca (lbs/A)': calcium,
+            'Mg (lbs/A)': magnesium,
+            'Zn (lbs/A)': zinc,
+            'Mn (lbs/A)': manganese,
+            'Cu (lbs/A)': copper,
+            'B (lbs/A)': boron,
+            'Na (lbs/A)': sodium,
+            'S (lbs/A)': sulfur,
+            'EC (mmhos/cm)': ec,
+            'NO3-N (ppm)': no3_n,
+            'OM (%)': om,
+            'Bulk Density (lbs/A)': bulk_density,
+            'Crop Type': crop_type,
+            'Lime (lbs/1,000 ft² or /A)': lime_recommendation
+        }
+        return new_row_data
 
-        records = []
-        for tr in summary_tbl.find_all("tr")[1:]:
-            td = tr.find_all("td")
-            if len(td) < 20:
-                continue  # skip blank / malformed rows
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching URL {url}: {e}")
+        return None
+    except Exception as e:
+        st.error(f"An error occurred while scraping {url}: {e}")
+        return None
 
-            name         = td[0].get_text(strip=True)
-            date_samp    = td[1].get_text(strip=True)
-            sample_no    = td[2].get_text(strip=True)
-            account_no   = re.sub(r"\D", "", sample_no)
-            lab_num      = td[3].get_text(strip=True)
-            href         = td[3].find("a")["href"] if td[3].find("a") else ""
-            soil_pH      = td[4].get_text(strip=True)
-            buffer_pH    = td[5].get_text(strip=True)
-            p_lbs, k_lbs, ca_lbs, mg_lbs = [td[i].get_text(strip=True) for i in range(6,10)]
-            zn_lbs, mn_lbs, cu_lbs, b_lbs = [td[i].get_text(strip=True) for i in range(10,14)]
-            na_lbs      = td[14].get_text(strip=True)
-            s_lbs       = td[15].get_text(strip=True)
-            ec          = td[16].get_text(strip=True)
-            no3_n       = td[17].get_text(strip=True)
-            om_pct      = td[18].get_text(strip=True)
-            bulk_den    = td[19].get_text(strip=True)
+# Streamlit App
+st.set_page_config(layout="wide", page_title="Clemson Soil Report Scraper")
 
-            crop_type, lime_val = (None, None)
-            if href:
-                txt_url = txt_url_from_href(results_url, href)
-                try:
-                    txt_resp = session.get(txt_url, timeout=15)
-                    if txt_resp.ok:
-                        crop_type, lime_val = extract_crop_and_lime(txt_resp.text)
-                except Exception:
-                    pass  # silently continue; leave None if failed
+st.title("🌱 Clemson Soil Report Scraper – Full Data + Crop Type")
+st.write("Paste any Clemson results.aspx URL (with your LabNum range or date range), click **Start Scraping**, and get a CSV with full soil data plus the Crop type and the lab's lime recommendation.")
 
-            records.append({
-                "Account Number": account_no,
-                "Name": name,
-                "Date Sampled": date_samp,
-                "Sample No": sample_no,
-                "Lab Number": lab_num,
-                "Soil pH": soil_pH,
-                "Buffer pH": buffer_pH,
-                "P (lbs/A)": p_lbs,
-                "K (lbs/A)": k_lbs,
-                "Ca (lbs/A)": ca_lbs,
-                "Mg (lbs/A)": mg_lbs,
-                "Zn (lbs/A)": zn_lbs,
-                "Mn (lbs/A)": mn_lbs,
-                "Cu (lbs/A)": cu_lbs,
-                "B (lbs/A)": b_lbs,
-                "Na (lbs/A)": na_lbs,
-                "S (lbs/A)": s_lbs,
-                "EC (mmhos/cm)": ec,
-                "NO3‑N (ppm)": no3_n,
-                "OM (%)": om_pct,
-                "Bulk Density (lbs/A)": bulk_den,
-                "Crop Type": crop_type or "None",
-                "Lime (lbs/1000 ft²)": lime_val or "None",
-            })
-            time.sleep(0.25)  # polite pause
+# Initialize or clear session state
+if 'scraped_data' not in st.session_state:
+    st.session_state.scraped_data = pd.DataFrame()
 
-        df = pd.DataFrame(records)
-        st.success("✅ Extraction complete!")
-        st.dataframe(df, use_container_width=True)
-        st.download_button(
-            "📥 Download CSV",
-            df.to_csv(index=False).encode("utf-8"),
-            "soil_full_data.csv",
-            mime="text/csv"
-        )
+if 'scraping_done' not in st.session_state:
+    st.session_state.scraping_done = False
+
+# Input URL
+results_page_url = st.text_input("Results page URL", "https://psaweb.clemson.edu/soils/aspx/results.aspx?qs=1&LabNumA=25050901&LabNumB=25050930&DateA=&DateB=&Name=&UserName=AGSRVLB&AdminAuth=0&submit=SEARCH")
+
+if st.button("Start Scraping", key='start_scraping'):
+    if not results_page_url:
+        st.warning("Please enter a URL.")
+    else:
+        with st.spinner('Scraping in progress... Please wait.'):
+            try:
+                main_page = requests.get(results_page_url, timeout=10)
+                main_page.raise_for_status()
+                main_soup = BeautifulSoup(main_page.content, "html.parser")
+                
+                # Find all hyperlinks that lead to a standardreport.aspx page
+                report_links = main_soup.find_all('a', href=lambda href: href and 'standardreport.aspx' in href)
+
+                if not report_links:
+                    st.error("No individual report links found on the provided URL. Please check the URL and ensure it leads to a results page with report links.")
+                else:
+                    st.info(f"Found {len(report_links)} reports to scrape.")
+                    
+                    all_data = []
+                    progress_bar = st.progress(0)
+
+                    # Create a new DataFrame for this scraping session
+                    temp_df = st.session_state.scraped_data.copy()
+
+                    for i, link in enumerate(report_links):
+                        report_path = link['href']
+                        # Construct the full URL
+                        full_report_url = f"https://psaweb.clemson.edu/soils/aspx/{report_path}"
+                        
+                        # Scrape the report
+                        report_data = scrape_report(full_report_url, temp_df)
+                        
+                        if report_data:
+                            all_data.append(report_data)
+                            # Add new data to the temp_df to check for duplicates within the same run
+                            new_df_row = pd.DataFrame([report_data])
+                            temp_df = pd.concat([temp_df, new_df_row], ignore_index=True)
+
+                        # Update progress bar
+                        progress_bar.progress((i + 1) / len(report_links))
+                        time.sleep(0.1) # Small delay to be polite to the server
+                    
+                    # Convert the list of dictionaries to a DataFrame
+                    if all_data:
+                        new_data_df = pd.DataFrame(all_data)
+                        # Concatenate with existing data in session state
+                        st.session_state.scraped_data = pd.concat([st.session_state.scraped_data, new_data_df], ignore_index=True).drop_duplicates(subset=['LabNum']).sort_values(by='LabNum').reset_index(drop=True)
+
+                    st.session_state.scraping_done = True
+            
+            except requests.exceptions.RequestException as e:
+                st.error(f"Failed to access the results URL: {e}")
+            except Exception as e:
+                st.error(f"An unexpected error occurred: {e}")
+
+if st.session_state.scraping_done:
+    st.success("Extraction complete!")
+
+if not st.session_state.scraped_data.empty:
+    st.markdown("---")
+    st.subheader("Scraped Data")
+    st.dataframe(st.session_state.scraped_data)
+    st.markdown(get_table_download_link(st.session_state.scraped_data), unsafe_allow_html=True)
+    if st.button("Clear All Data"):
+        st.session_state.scraped_data = pd.DataFrame()
+        st.session_state.scraping_done = False
+        st.rerun()
