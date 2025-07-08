@@ -21,8 +21,6 @@ def scrape_individual_report(report_url):
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
 
-        # This robust method finds the Lime value, then finds its parent row,
-        # and then grabs the first cell in that row, which is the Crop type.
         lime_cell = soup.find('td', string=re.compile(r'lbs/1000sq ft'))
         if lime_cell:
             parent_row = lime_cell.find_parent('tr')
@@ -57,36 +55,38 @@ def scrape_main_table(url):
 
         all_rows_data = []
         
-        # Find all rows in the table body
-        table_rows = table.find('tbody').find_all('tr')
+        # ==================== CORRECTED LINE ======================================
+        # Directly find all 'tr' elements and skip the header row with [1:].
+        # This is more robust and doesn't depend on a 'tbody' tag.
+        table_rows = table.find_all('tr')[1:]
+        # ==========================================================================
         
-        # Set up a progress bar
+        if not table_rows:
+            st.error("Found the table, but could not find any data rows within it.")
+            return None
+
         progress_bar = st.progress(0, text="Scraping in progress...")
 
         for i, row in enumerate(table_rows):
             cols = row.find_all('td')
             row_data = [col.get_text(strip=True) for col in cols]
             
-            # Find the link in the 'LabNum' column (4th column, index 3)
-            lab_num_cell = cols[3]
-            link_tag = lab_num_cell.find('a')
-            
-            crop_type = "Not Found"
-            if link_tag and 'href' in link_tag.attrs:
-                # Construct the full URL for the individual report
-                report_link = urljoin(url, link_tag['href'])
-                # Scrape the crop type from that report
-                crop_type = scrape_individual_report(report_link)
-            
-            row_data.append(crop_type)
-            all_rows_data.append(row_data)
+            if len(cols) > 3: # Ensure the row has enough columns
+                lab_num_cell = cols[3]
+                link_tag = lab_num_cell.find('a')
+                
+                crop_type = "Not Found"
+                if link_tag and 'href' in link_tag.attrs:
+                    report_link = urljoin(url, link_tag['href'])
+                    crop_type = scrape_individual_report(report_link)
+                
+                row_data.append(crop_type)
+                all_rows_data.append(row_data)
 
-            # Update the progress bar
             progress_bar.progress((i + 1) / len(table_rows), text=f"Scraping report {i+1} of {len(table_rows)}...")
 
-        progress_bar.empty() # Clear the progress bar
+        progress_bar.empty()
         
-        # Create a pandas DataFrame
         df = pd.DataFrame(all_rows_data, columns=headers)
         return df
 
@@ -113,13 +113,11 @@ if st.button("Start Scraping", type="primary"):
         scraped_df = scrape_main_table(url_to_scrape)
         
         if scraped_df is not None:
-            # Store the result in session state to persist it
             st.session_state['scraped_data'] = scraped_df
     else:
         st.warning("Please enter a URL.")
 
 
-# Display the DataFrame and download button if data exists in session state
 if 'scraped_data' in st.session_state:
     st.subheader("Combined Soil Report Data")
     
