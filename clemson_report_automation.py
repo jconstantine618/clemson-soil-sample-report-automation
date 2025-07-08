@@ -27,10 +27,13 @@ def get_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
-    
-    service = ChromeService(
-        ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()
-    )
+    # Add arguments to make it more stable in a container
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-infobars")
+    options.add_argument("--single-process")
+    options.add_argument("--disable-application-cache")
+
+    service = ChromeService(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
     return webdriver.Chrome(service=service, options=options)
 
 
@@ -82,7 +85,7 @@ def get_recommendation_data(table):
 # --- Main Scraping Function (using Requests)---
 def scrape_report_with_requests(session, url):
     try:
-        response = session.get(url, timeout=10)
+        response = session.get(url, timeout=15)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.content, "html.parser")
@@ -131,18 +134,12 @@ if st.button("Start Scraping", key='start_scraping'):
     if not results_page_url:
         st.warning("Please enter a URL.")
     else:
-        all_data = []
-        progress_bar = st.progress(0, text="Initializing...")
-        
         try:
             # STEP 1: Use Selenium to get a valid session and cookies
-            with st.spinner('Initializing browser to establish a session...'):
+            with st.spinner('Initializing...'):
                 driver = get_driver()
                 driver.get(results_page_url)
-                # Wait for links to appear to ensure the session is active
-                WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, "View Report")))
-                
-                # Get links and cookies from the driver
+                WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, "View Report")))
                 main_soup = BeautifulSoup(driver.page_source, "html.parser")
                 report_links = [a['href'] for a in main_soup.find_all('a', href=lambda h: h and 'standardreport.aspx' in h)]
                 selenium_cookies = driver.get_cookies()
@@ -150,16 +147,16 @@ if st.button("Start Scraping", key='start_scraping'):
             if not report_links:
                 st.error("No report links found. Please check the URL.")
             else:
-                st.info(f"Found {len(report_links)} reports. Now fetching with a lightweight client...")
+                st.info(f"Found {len(report_links)} reports. Fetching data...")
                 
-                # STEP 2: Use a lightweight Requests session with the cookies for the actual scraping
+                # STEP 2: Use a lightweight Requests session with the cookies
                 req_session = requests.Session()
-                # Transfer cookies from Selenium to Requests
                 for cookie in selenium_cookies:
                     req_session.cookies.set(cookie['name'], cookie['value'], domain=cookie['domain'])
-                # Add a browser-like User-Agent
-                req_session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"})
+                req_session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"})
 
+                all_data = []
+                progress_bar = st.progress(0, text="Scraping reports...")
                 existing_labs = set(st.session_state.scraped_data['LabNum']) if 'LabNum' in st.session_state.scraped_data.columns else set()
 
                 for i, link_path in enumerate(report_links):
@@ -167,28 +164,13 @@ if st.button("Start Scraping", key='start_scraping'):
                     lab_num_str = parse_qs(urlparse(full_report_url).query).get('id', [None])[0]
                     
                     if lab_num_str and int(lab_num_str) in existing_labs:
-                        st.write(f"Skipping already scraped LabNum: {lab_num_str}")
-                    else:
-                        report_data = scrape_report_with_requests(req_session, full_report_url)
-                        if report_data:
-                            all_data.append(report_data)
+                        continue # Silently skip already scraped labs
+                    
+                    report_data = scrape_report_with_requests(req_session, full_report_url)
+                    if report_data:
+                        all_data.append(report_data)
+                    time.sleep(0.2) # Add a small delay between requests to be polite to the server
                     
                     progress_bar.progress((i + 1) / len(report_links), text=f"Fetched report {i+1}/{len(report_links)}")
                 
-                if all_data:
-                    new_df = pd.DataFrame(all_data)
-                    st.session_state.scraped_data = pd.concat([st.session_state.scraped_data, new_df], ignore_index=True).drop_duplicates(subset=['LabNum']).sort_values(by='LabNum').reset_index(drop=True)
-                
-                st.success("Extraction complete! 🎉")
-
-        except Exception as e:
-            st.error(f"A critical error occurred: {e}")
-
-if not st.session_state.scraped_data.empty:
-    st.markdown("---")
-    st.subheader("Scraped Data")
-    st.dataframe(st.session_state.scraped_data)
-    st.markdown(get_table_download_link(st.session_state.scraped_data), unsafe_allow_html=True)
-    if st.button("Clear All Data"):
-        st.session_state.scraped_data = pd.DataFrame()
-        st.rerun()
+                if all_.
