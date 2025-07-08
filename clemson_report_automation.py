@@ -26,13 +26,12 @@ def get_driver():
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080")
-    # Add arguments to make it more stable in a container
+    # Add more stability flags
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-infobars")
-    options.add_argument("--single-process")
-    options.add_argument("--disable-application-cache")
-
+    options.add_argument("--disable-setuid-sandbox")
+    options.add_argument('--disable-features=Translate')
+    
     service = ChromeService(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
     return webdriver.Chrome(service=service, options=options)
 
@@ -135,14 +134,10 @@ if st.button("Start Scraping", key='start_scraping'):
         st.warning("Please enter a URL.")
     else:
         try:
-            # STEP 1: Use Selenium to get a valid session and cookies
             with st.spinner('Initializing browser to establish a session...'):
                 driver = get_driver()
                 driver.get(results_page_url)
-                # Wait for links to appear to ensure the session is active
                 WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, "View Report")))
-                
-                # Get links and cookies from the driver
                 main_soup = BeautifulSoup(driver.page_source, "html.parser")
                 report_links = [a['href'] for a in main_soup.find_all('a', href=lambda h: h and 'standardreport.aspx' in h)]
                 selenium_cookies = driver.get_cookies()
@@ -151,8 +146,6 @@ if st.button("Start Scraping", key='start_scraping'):
                 st.error("No report links found. Please check the URL.")
             else:
                 st.info(f"Found {len(report_links)} reports. Fetching data...")
-                
-                # STEP 2: Use a lightweight Requests session with the cookies
                 req_session = requests.Session()
                 for cookie in selenium_cookies:
                     req_session.cookies.set(cookie['name'], cookie['value'], domain=cookie['domain'])
@@ -167,12 +160,12 @@ if st.button("Start Scraping", key='start_scraping'):
                     lab_num_str = parse_qs(urlparse(full_report_url).query).get('id', [None])[0]
                     
                     if lab_num_str and int(lab_num_str) in existing_labs:
-                        continue # Silently skip already scraped labs
+                        continue
                     
                     report_data = scrape_report_with_requests(req_session, full_report_url)
                     if report_data:
                         all_data.append(report_data)
-                    time.sleep(0.2)
+                    time.sleep(0.25)
                     
                     progress_bar.progress((i + 1) / len(report_links), text=f"Fetched report {i+1}/{len(report_links)}")
                 
@@ -183,7 +176,7 @@ if st.button("Start Scraping", key='start_scraping'):
                 st.success("Extraction complete! 🎉")
 
         except Exception as e:
-            st.error(f"A critical error occurred during the scraping process: {e}")
+            st.error(f"A critical error occurred: {e}")
 
 if not st.session_state.scraped_data.empty:
     st.markdown("---")
