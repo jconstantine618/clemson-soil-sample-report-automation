@@ -1,165 +1,165 @@
-import streamlit as st
-import pandas as pd
-import time
-import base64
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urlparse, parse_qs
+from __future__ import annotations
 
-# --- Mappings for flexible data extraction ---
-# Maps various labels found on the report to our desired DataFrame column names
-LABEL_MAPPING = {
-    "Soil pH": "Soil pH",
-    "Buffer pH": "Buffer pH",
-    "Phosphorus (P)": "P (lbs/A)",
-    "Potassium (K)": "K (lbs/A)",
-    "Calcium (Ca)": "Ca (lbs/A)",
-    "Magnesium (Mg)": "Mg (lbs/A)",
-    "Zinc (Zn)": "Zn (lbs/A)",
-    "Manganese (Mn)": "Mn (lbs/A)",
-    "Copper (Cu)": "Cu (lbs/A)",
-    "Boron (B)": "B (lbs/A)",
-    "Sodium (Na)": "Na (lbs/A)",
-    "Sulfur (S)": "S (lbs/A)",
-    "Soluble Salts": "EC (mmhos/cm)",
-    "Nitrate Nitrogen": "NO3-N (ppm)",
-    "Organic Matter": "OM (%)",
+import io
+import re
+import time
+from typing import List, Dict
+
+import pandas as pd
+import streamlit as st
+from bs4 import BeautifulSoup
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.common.exceptions import WebDriverException
+from webdriver_manager.chrome import ChromeDriverManager
+
+###############################################################################
+# ---------- Selenium helpers -------------------------------------------------
+###############################################################################
+
+def _init_driver() -> webdriver.Chrome:
+    """Return a headless Chrome driver configured for Streamlit Cloud."""
+    chrome_opts = Options()
+    chrome_opts.add_argument("--headless=new")  # Chrome 109+ headless mode
+    chrome_opts.add_argument("--no-sandbox")
+    chrome_opts.add_argument("--disable-dev-shm-usage")
+    chrome_opts.add_argument("--disable-gpu")
+    # Reduce resource use
+    chrome_opts.add_argument("--window-size=1200,800")
+    service = Service(ChromeDriverManager().install())
+    return webdriver.Chrome(service=service, options=chrome_opts)
+
+###############################################################################
+# ---------- Core scraping routines ------------------------------------------
+###############################################################################
+
+NUTRIENT_KEYS = [
+    "P", "K", "Ca", "Mg", "Zn", "Mn", "Cu", "B", "Na", "S", "EC", "NO3-N", "OM",
+    "Bulk Density",
+]
+
+# Regex patterns pre‑compiled for speed
+_RX_LIME  = re.compile(r"^Lime\s+(.+)", re.I | re.M)
+_RX_CROP  = re.compile(r"^Crop\s+(.+)", re.I | re.M)
+_RX_ELEM  = {
+    key: re.compile(fr"^{key}.*?(\d+\.?\d*)", re.I | re.M) for key in NUTRIENT_KEYS
 }
 
-# --- Data Parsing Functions ---
-def get_analysis_data(table):
-    """Parses the main analysis results table using a flexible mapping."""
-    data = {}
-    if not table: return data
-    try:
-        for row in table.find('tbody').find_all('tr'):
-            header = row.find('th')
-            if header:
-                label = header.text.strip()
-                value_cell = header.find_next_sibling('td')
-                if value_cell:
-                    # Look up the label in our mapping
-                    for key, column_name in LABEL_MAPPING.items():
-                        if key in label:
-                            data[column_name] = value_cell.text.strip()
-                            break # Move to the next row once a match is found
-    except Exception as e:
-        st.warning(f"Could not parse analysis table: {e}")
-    return data
 
-def get_recommendation_data(table):
-    """Parses the recommendations table for Crop Type and Lime."""
-    crop_type, lime = "None", "N/A"
-    if table:
+def _extract_report_fields(html: str) -> Dict[str, str]:
+    """Parse a single *standardreport.aspx* page and return the target fields."""
+    soup = BeautifulSoup(html, "html.parser")
+
+    # ---------- easy keys: Lab #, Sample No, Date, pH values ----------------
+    banner = soup.find(string=re.compile(r"Sample Id", re.I))
+    labnum = soil_ph = buffer_ph = date_sampled = sample_no = ""
+    if banner and banner.parent:
+        # banner.row looks like "Sample Id: 10772SHULT   Soil Code: 4"
+        maybe = banner.parent.text
+        m = re.search(r"Sample Id:\s*(\w+)", maybe)
+        if m:
+            sample_no = m.group(1)
+        m = re.search(r"LabNum:\s*(\d+)", html)
+        if m:
+            labnum = m.group(1)
+    # pH values
+    ph_match = re.search(r"Soil pH\s+(\d+\.\d+).*?Buffer pH\s+(\d+\.\d+)", html, re.S)
+    if ph_match:
+        soil_ph, buffer_ph = ph_match.group(1), ph_match.group(2)
+    # date (use first mm/dd/yyyy on page)
+    dt_match = re.search(r"(\d{1,2}/\d{1,2}/\d{4})", html)
+    if dt_match:
+        date_sampled = dt_match.group(1)
+
+    # ---------- crop & lime --------------------------------------------------
+    body_text = soup.get_text("\n")
+    crop_type = _RX_CROP.search(body_text)
+    crop_type = crop_type.group(1).strip() if crop_type else ""
+
+    lime = _RX_LIME.search(body_text)
+    lime_val = lime.group(1).strip() if lime else "N/A"
+
+    # ---------- nutrients ----------------------------------------------------
+    nutrients = {}
+    for key, rx in _RX_ELEM.items():
+        m = rx.search(body_text)
+        nutrients[key] = m.group(1) if m else "N/A"
+
+    # ---------- account number from sample no (digits only) -----------------
+    account = re.sub(r"\D", "", sample_no) if sample_no else ""
+
+    return {
+        "Account": account,
+        "Sample No": sample_no,
+        "Lab #": labnum,
+        "Date": date_sampled,
+        "Soil pH": soil_ph,
+        "Buffer pH": buffer_ph,
+        **{f"{k} (lbs/A)" if k in ["P", "K", "Ca", "Mg", "Zn", "Mn", "Cu", "B", "Na", "S"] else k: v for k, v in nutrients.items()},
+        "Crop Type": crop_type,
+        "Lime (lbs/1000 ft² or /A)": lime_val,
+    }
+
+
+def _collect_lab_links(driver: webdriver.Chrome, url: str) -> List[str]:
+    """Return a list of *standardreport.aspx?id=...* URLs for each Lab # in a
+    *results.aspx* page. If the user supplies a *standardreport* URL already,
+    just return that.
+    """
+    if "standardreport.aspx" in url:
+        return [url]
+
+    driver.get(url)
+    time.sleep(2)
+    links = driver.find_elements("css selector", "a[href*='standardreport.aspx?id']")
+    return [link.get_attribute("href") for link in links]
+
+###############################################################################
+# ---------- Streamlit interface --------------------------------------------
+###############################################################################
+
+def main():
+    st.title("Clemson Soil Report Scraper – Full Data + Crop + Lime")
+    st.markdown("Paste any **results.aspx** URL or a single **standardreport.aspx?id=...** link, click **Start Scraping**, and download the consolidated CSV.")
+
+    url = st.text_input(
+        "Results page URL",
+        "https://psaweb.clemson.edu/soils/aspx/results.aspx?qs=1&LabNumA=25050901&LabNumB=25050930&DateA=&DateB=&Name=&UserName=AGSRVLB&AdminAuth=0&submit=SEARCH",
+        placeholder="https://psaweb.clemson.edu/...",
+    )
+
+    if st.button("Start Scraping") and url:
+        records = []
         try:
-            rec_rows = table.find('tbody').find_all('tr')
-            if len(rec_rows) > 1:
-                rec_cols = rec_rows[1].find_all('td')
-                if len(rec_cols) > 0: crop_type = rec_cols[0].text.strip()
-                if len(rec_cols) > 1: lime = rec_cols[1].text.strip()
-        except Exception as e:
-            st.warning(f"Could not parse recommendations table: {e}")
-    return crop_type, lime
+            driver = _init_driver()
+        except WebDriverException as e:
+            st.error(f"Failed to launch headless Chrome – {e}")
+            st.stop()
 
-# --- Main Scraping Function ---
-def scrape_report(session, url):
-    try:
-        response = session.get(url, timeout=15)
-        response.raise_for_status()
+        try:
+            lab_urls = _collect_lab_links(driver, url)
+            progress = st.progress(0, text=f"Fetched report 0/{len(lab_urls)}")
+            for idx, lab_url in enumerate(lab_urls, 1):
+                driver.get(lab_url)
+                time.sleep(1.5)  # quick wait for render
+                data = _extract_report_fields(driver.page_source)
+                records.append(data)
+                progress.progress(idx / len(lab_urls), text=f"Fetched report {idx}/{len(lab_urls)}")
+            progress.empty()
+        finally:
+            driver.quit()
 
-        soup = BeautifulSoup(response.content, "html.parser")
-        parsed_url = urlparse(url)
-        lab_num = parse_qs(parsed_url.query).get('id', [None])[0]
+        if records:
+            df = pd.DataFrame(records)
+            st.success("Extraction complete! 🎉")
+            st.dataframe(df, use_container_width=True)
+            # download
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button("Download CSV", csv, "clemson_soil_reports.csv", "text/csv")
+        else:
+            st.warning("No data extracted – check the URL and try again.")
 
-        analysis_table = soup.find('table', id='tblAnalysis')
-        recommendations_table = soup.find('table', summary='Recommendations')
 
-        report_data = get_analysis_data(analysis_table)
-        report_data['LabNum'] = int(lab_num) if lab_num else None
-        
-        crop_type, lime = get_recommendation_data(recommendations_table)
-        report_data['Crop Type'] = crop_type
-        report_data['Lime (lbs/1,000 ft² or /A)'] = lime
-        
-        all_columns = [
-            'LabNum', 'Soil pH', 'Buffer pH', 'P (lbs/A)', 'K (lbs/A)', 'Ca (lbs/A)',
-            'Mg (lbs/A)', 'Zn (lbs/A)', 'Mn (lbs/A)', 'Cu (lbs/A)', 'B (lbs/A)',
-            'Na (lbs/A)', 'S (lbs/A)', 'EC (mmhos/cm)', 'NO3-N (ppm)', 'OM (%)',
-            'Bulk Density (lbs/A)', 'Crop Type', 'Lime (lbs/1,000 ft² or /A)'
-        ]
-        # Fill in any missing values with "N/A" to ensure a consistent structure
-        return {col: report_data.get(col, 'N/A') for col in all_columns}
-
-    except Exception as e:
-        st.error(f"Failed to scrape {url}: {e}")
-        return None
-
-# --- Helper for CSV Download ---
-def get_table_download_link(df):
-    csv = df.to_csv(index=False)
-    b64 = base64.b64encode(csv.encode()).decode()
-    return f'<a href="data:file/csv;base64,{b64}" download="clemson_soil_data.csv">Download CSV file</a>'
-
-# --- Streamlit App UI ---
-st.set_page_config(layout="wide", page_title="Clemson Soil Report Scraper")
-st.title("🌱 Clemson Soil Report Scraper")
-st.write("Paste a Clemson results URL, click **Start Scraping**, and get your data.")
-
-if 'scraped_data' not in st.session_state:
-    st.session_state.scraped_data = pd.DataFrame()
-
-results_page_url = st.text_input("Results page URL", "https://psaweb.clemson.edu/soils/aspx/results.aspx?qs=1&LabNumA=25050901&LabNumB=25050930&DateA=&DateB=&Name=&UserName=AGSRVLB&AdminAuth=0&submit=SEARCH")
-
-if st.button("Start Scraping", key='start_scraping'):
-    if not results_page_url:
-        st.warning("Please enter a URL.")
-    else:
-        with st.spinner("Establishing session and fetching report links..."):
-            try:
-                session = requests.Session()
-                session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"})
-
-                response = session.get(results_page_url, timeout=15)
-                response.raise_for_status()
-                main_soup = BeautifulSoup(response.content, "html.parser")
-                report_links = [a['href'] for a in main_soup.find_all('a', href=lambda h: h and 'standardreport.aspx' in h)]
-                
-                if not report_links:
-                    st.error("No report links found. Please check the URL.")
-                else:
-                    st.info(f"Found {len(report_links)} reports. Fetching data...")
-                    all_data = []
-                    progress_bar = st.progress(0, text="Scraping reports...")
-                    existing_labs = set(st.session_state.scraped_data['LabNum']) if 'LabNum' in st.session_state.scraped_data.columns else set()
-
-                    for i, link_path in enumerate(report_links):
-                        full_report_url = f"https://psaweb.clemson.edu/soils/aspx/{link_path}"
-                        lab_num_str = parse_qs(urlparse(full_report_url).query).get('id', [None])[0]
-                        
-                        if lab_num_str and int(lab_num_str) in existing_labs:
-                            continue
-                        
-                        report_data = scrape_report(session, full_report_url)
-                        if report_data:
-                            all_data.append(report_data)
-                        time.sleep(0.2)
-                        
-                        progress_bar.progress((i + 1) / len(report_links), text=f"Fetched report {i+1}/{len(report_links)}")
-                    
-                    if all_data:
-                        new_df = pd.DataFrame(all_data)
-                        st.session_state.scraped_data = pd.concat([st.session_state.scraped_data, new_df], ignore_index=True).drop_duplicates(subset=['LabNum']).sort_values(by='LabNum').reset_index(drop=True)
-                    
-                    st.success("Extraction complete! 🎉")
-
-            except Exception as e:
-                st.error(f"A critical error occurred: {e}")
-
-if not st.session_state.scraped_data.empty:
-    st.markdown("---")
-    st.subheader("Scraped Data")
-    st.dataframe(st.session_state.scraped_data)
-    st.markdown(get_table_download_link(st.session_state.scraped_data), unsafe_allow_html=True)
-    if st.button("Clear All Data"):
-        st.session_state.scraped_data = pd.DataFrame()
-        st.rerun()
+if __name__ == "__main__":
+    main()
