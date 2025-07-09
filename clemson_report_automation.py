@@ -3,6 +3,7 @@ import requests
 import re
 import time
 import pandas as pd
+from bs4 import BeautifulSoup # <-- This line was missing
 from urllib.parse import urljoin, urlparse, parse_qs, urlencode
 
 # --- Page Configuration ---
@@ -143,7 +144,12 @@ if st.button("Start Scraping", type="primary"):
                 "K (lbs/A)": td[7].get_text(strip=True),
                 "Ca (lbs/A)": td[8].get_text(strip=True),
                 "Mg (lbs/A)": td[9].get_text(strip=True),
-                "Zn (lbs/A)": td[10].get_text(strip=True),
+                "Zn (lbs/A)": td[10].get_text(strip=I've fixed the error in your Python script. The log file you sent showed a `NameError`, which happened because the `BeautifulSoup` library was being used without being imported first.
+
+I've added the necessary `from bs4 import BeautifulSoup` line to the top of the script. This should resolve the issue.
+
+I have updated the code in the Canvas with this fix. Please try running it again.
+true),
                 "Mn (lbs/A)": td[11].get_text(strip=True),
                 "Cu (lbs/A)": td[12].get_text(strip=True),
                 "B (lbs/A)": td[13].get_text(strip=True),
