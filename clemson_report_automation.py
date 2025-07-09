@@ -6,9 +6,29 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, parse_qs
 
+# --- Mappings for flexible data extraction ---
+# Maps various labels found on the report to our desired DataFrame column names
+LABEL_MAPPING = {
+    "Soil pH": "Soil pH",
+    "Buffer pH": "Buffer pH",
+    "Phosphorus (P)": "P (lbs/A)",
+    "Potassium (K)": "K (lbs/A)",
+    "Calcium (Ca)": "Ca (lbs/A)",
+    "Magnesium (Mg)": "Mg (lbs/A)",
+    "Zinc (Zn)": "Zn (lbs/A)",
+    "Manganese (Mn)": "Mn (lbs/A)",
+    "Copper (Cu)": "Cu (lbs/A)",
+    "Boron (B)": "B (lbs/A)",
+    "Sodium (Na)": "Na (lbs/A)",
+    "Sulfur (S)": "S (lbs/A)",
+    "Soluble Salts": "EC (mmhos/cm)",
+    "Nitrate Nitrogen": "NO3-N (ppm)",
+    "Organic Matter": "OM (%)",
+}
+
 # --- Data Parsing Functions ---
 def get_analysis_data(table):
-    """Parses the main analysis results table."""
+    """Parses the main analysis results table using a flexible mapping."""
     data = {}
     if not table: return data
     try:
@@ -18,21 +38,11 @@ def get_analysis_data(table):
                 label = header.text.strip()
                 value_cell = header.find_next_sibling('td')
                 if value_cell:
-                    if "Soil pH" in label: data['Soil pH'] = value_cell.text.strip()
-                    elif "Buffer pH" in label: data['Buffer pH'] = value_cell.text.strip()
-                    elif "Phosphorus (P)" in label: data['P (lbs/A)'] = value_cell.text.strip()
-                    elif "Potassium (K)" in label: data['K (lbs/A)'] = value_cell.text.strip()
-                    elif "Calcium (Ca)" in label: data['Ca (lbs/A)'] = value_cell.text.strip()
-                    elif "Magnesium (Mg)" in label: data['Mg (lbs/A)'] = value_cell.text.strip()
-                    elif "Zinc (Zn)" in label: data['Zn (lbs/A)'] = value_cell.text.strip()
-                    elif "Manganese (Mn)" in label: data['Mn (lbs/A)'] = value_cell.text.strip()
-                    elif "Copper (Cu)" in label: data['Cu (lbs/A)'] = value_cell.text.strip()
-                    elif "Boron (B)" in label: data['B (lbs/A)'] = value_cell.text.strip()
-                    elif "Sodium (Na)" in label: data['Na (lbs/A)'] = value_cell.text.strip()
-                    elif "Sulfur (S)" in label: data['S (lbs/A)'] = value_cell.text.strip()
-                    elif "Soluble Salts" in label: data['EC (mmhos/cm)'] = value_cell.text.strip()
-                    elif "Nitrate Nitrogen" in label: data['NO3-N (ppm)'] = value_cell.text.strip()
-                    elif "Organic Matter" in label: data['OM (%)'] = value_cell.text.strip()
+                    # Look up the label in our mapping
+                    for key, column_name in LABEL_MAPPING.items():
+                        if key in label:
+                            data[column_name] = value_cell.text.strip()
+                            break # Move to the next row once a match is found
     except Exception as e:
         st.warning(f"Could not parse analysis table: {e}")
     return data
@@ -51,7 +61,7 @@ def get_recommendation_data(table):
             st.warning(f"Could not parse recommendations table: {e}")
     return crop_type, lime
 
-# --- Main Scraping Function (using Requests)---
+# --- Main Scraping Function ---
 def scrape_report(session, url):
     try:
         response = session.get(url, timeout=15)
@@ -77,6 +87,7 @@ def scrape_report(session, url):
             'Na (lbs/A)', 'S (lbs/A)', 'EC (mmhos/cm)', 'NO3-N (ppm)', 'OM (%)',
             'Bulk Density (lbs/A)', 'Crop Type', 'Lime (lbs/1,000 ft² or /A)'
         ]
+        # Fill in any missing values with "N/A" to ensure a consistent structure
         return {col: report_data.get(col, 'N/A') for col in all_columns}
 
     except Exception as e:
@@ -105,11 +116,9 @@ if st.button("Start Scraping", key='start_scraping'):
     else:
         with st.spinner("Establishing session and fetching report links..."):
             try:
-                # Use a requests.Session to handle cookies and maintain session
                 session = requests.Session()
                 session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"})
 
-                # Get the main page to find the links and establish the session
                 response = session.get(results_page_url, timeout=15)
                 response.raise_for_status()
                 main_soup = BeautifulSoup(response.content, "html.parser")
