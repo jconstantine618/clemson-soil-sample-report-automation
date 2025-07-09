@@ -3,7 +3,7 @@ import requests
 import re
 import time
 import pandas as pd
-from bs4 import BeautifulSoup # <-- This line was missing
+from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, parse_qs, urlencode
 
 # --- Page Configuration ---
@@ -117,8 +117,24 @@ if st.button("Start Scraping", type="primary"):
             if len(td) < 20:
                 continue
 
-            href_tag = td[3].find("a")
-            href = href_tag["href"] if href_tag else ""
+            # Reverting to original data extraction structure for clarity
+            name         = td[0].get_text(strip=True)
+            date_samp    = td[1].get_text(strip=True)
+            sample_no    = td[2].get_text(strip=True)
+            account_no   = re.sub(r"\D", "", sample_no)
+            lab_num      = td[3].get_text(strip=True)
+            href_tag     = td[3].find("a")
+            href         = href_tag["href"] if href_tag else ""
+            soil_pH      = td[4].get_text(strip=True)
+            buffer_pH    = td[5].get_text(strip=True)
+            p_lbs, k_lbs, ca_lbs, mg_lbs = [td[i].get_text(strip=True) for i in range(6,10)]
+            zn_lbs, mn_lbs, cu_lbs, b_lbs = [td[i].get_text(strip=True) for i in range(10,14)]
+            na_lbs       = td[14].get_text(strip=True)
+            s_lbs        = td[15].get_text(strip=True)
+            ec           = td[16].get_text(strip=True)
+            no3_n        = td[17].get_text(strip=True)
+            om_pct       = td[18].get_text(strip=True)
+            bulk_den     = td[19].get_text(strip=True)
             
             # We need the text URL for the second screening step later
             txt_report_url = txt_url_from_href(results_url, href) if href else ""
@@ -133,32 +149,27 @@ if st.button("Start Scraping", type="primary"):
                     pass  # Silently continue
 
             records.append({
-                "Account Number": re.sub(r"\D", "", td[2].get_text(strip=True)),
-                "Name": td[0].get_text(strip=True),
-                "Date Sampled": td[1].get_text(strip=True),
-                "Sample No": td[2].get_text(strip=True),
-                "Lab Number": td[3].get_text(strip=True),
-                "Soil pH": td[4].get_text(strip=True),
-                "Buffer pH": td[5].get_text(strip=True),
-                "P (lbs/A)": td[6].get_text(strip=True),
-                "K (lbs/A)": td[7].get_text(strip=True),
-                "Ca (lbs/A)": td[8].get_text(strip=True),
-                "Mg (lbs/A)": td[9].get_text(strip=True),
-                "Zn (lbs/A)": td[10].get_text(strip=I've fixed the error in your Python script. The log file you sent showed a `NameError`, which happened because the `BeautifulSoup` library was being used without being imported first.
-
-I've added the necessary `from bs4 import BeautifulSoup` line to the top of the script. This should resolve the issue.
-
-I have updated the code in the Canvas with this fix. Please try running it again.
-true),
-                "Mn (lbs/A)": td[11].get_text(strip=True),
-                "Cu (lbs/A)": td[12].get_text(strip=True),
-                "B (lbs/A)": td[13].get_text(strip=True),
-                "Na (lbs/A)": td[14].get_text(strip=True),
-                "S (lbs/A)": td[15].get_text(strip=True),
-                "EC (mmhos/cm)": td[16].get_text(strip=True),
-                "NO3-N (ppm)": td[17].get_text(strip=True),
-                "OM (%)": td[18].get_text(strip=True),
-                "Bulk Density (lbs/A)": td[19].get_text(strip=True),
+                "Account Number": account_no,
+                "Name": name,
+                "Date Sampled": date_samp,
+                "Sample No": sample_no,
+                "Lab Number": lab_num,
+                "Soil pH": soil_pH,
+                "Buffer pH": buffer_pH,
+                "P (lbs/A)": p_lbs,
+                "K (lbs/A)": k_lbs,
+                "Ca (lbs/A)": ca_lbs,
+                "Mg (lbs/A)": mg_lbs,
+                "Zn (lbs/A)": zn_lbs,
+                "Mn (lbs/A)": mn_lbs,
+                "Cu (lbs/A)": cu_lbs,
+                "B (lbs/A)": b_lbs,
+                "Na (lbs/A)": na_lbs,
+                "S (lbs/A)": s_lbs,
+                "EC (mmhos/cm)": ec,
+                "NO3-N (ppm)": no3_n,
+                "OM (%)": om_pct,
+                "Bulk Density (lbs/A)": bulk_den,
                 "Crop Type": crop_type or "None",
                 "Lime (lbs/1000 ft²)": lime_val or "None",
                 "_report_url": txt_report_url # Store URL for the second step
@@ -173,11 +184,13 @@ true),
 # --- Display Area: Shows table and buttons if data exists ---
 
 if st.session_state.df_results is not None:
-    df_display = st.session_state.df_results.drop(columns=['_report_url'])
+    # Make a copy for display that doesn't show our internal URL column
+    df_display = st.session_state.df_results.drop(columns=['_report_url'], errors='ignore')
     st.dataframe(df_display, use_container_width=True, hide_index=True)
 
     # --- CSV Download Button ---
-    csv = st.session_state.df_results.to_csv(index=False).encode("utf-8")
+    # Use the display version for the download so the internal URL isn't in the CSV
+    csv = df_display.to_csv(index=False).encode("utf-8")
     st.download_button(
         "📥 Download CSV",
         data=csv,
