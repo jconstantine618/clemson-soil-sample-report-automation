@@ -1,1 +1,4 @@
-
+chromium
+chromium-driver
+# tesseract-ocr  # ← only if OCR fallback is implemented
+# tesseract-ocr-eng
