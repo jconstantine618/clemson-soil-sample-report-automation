@@ -6,36 +6,6 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, parse_qs
 
-# --- Selenium Imports ---
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service as ChromeService
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
-
-
-# --- Selenium WebDriver Setup for Streamlit Cloud ---
-@st.cache_resource
-def get_driver():
-    """Initializes and returns a Selenium WebDriver instance."""
-    options = Options()
-    options.add_argument("--disable-gpu")
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    # Add more stability flags
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-infobars")
-    options.add_argument("--disable-setuid-sandbox")
-    options.add_argument('--disable-features=Translate')
-    
-    service = ChromeService(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install())
-    return webdriver.Chrome(service=service, options=options)
-
-
 # --- Data Parsing Functions ---
 def get_analysis_data(table):
     """Parses the main analysis results table."""
@@ -82,7 +52,7 @@ def get_recommendation_data(table):
     return crop_type, lime
 
 # --- Main Scraping Function (using Requests)---
-def scrape_report_with_requests(session, url):
+def scrape_report(session, url):
     try:
         response = session.get(url, timeout=15)
         response.raise_for_status()
@@ -110,7 +80,7 @@ def scrape_report_with_requests(session, url):
         return {col: report_data.get(col, 'N/A') for col in all_columns}
 
     except Exception as e:
-        st.error(f"Failed to scrape {url} with requests: {e}")
+        st.error(f"Failed to scrape {url}: {e}")
         return None
 
 # --- Helper for CSV Download ---
@@ -133,50 +103,48 @@ if st.button("Start Scraping", key='start_scraping'):
     if not results_page_url:
         st.warning("Please enter a URL.")
     else:
-        try:
-            with st.spinner('Initializing browser to establish a session...'):
-                driver = get_driver()
-                driver.get(results_page_url)
-                WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.PARTIAL_LINK_TEXT, "View Report")))
-                main_soup = BeautifulSoup(driver.page_source, "html.parser")
+        with st.spinner("Establishing session and fetching report links..."):
+            try:
+                # Use a requests.Session to handle cookies and maintain session
+                session = requests.Session()
+                session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"})
+
+                # Get the main page to find the links and establish the session
+                response = session.get(results_page_url, timeout=15)
+                response.raise_for_status()
+                main_soup = BeautifulSoup(response.content, "html.parser")
                 report_links = [a['href'] for a in main_soup.find_all('a', href=lambda h: h and 'standardreport.aspx' in h)]
-                selenium_cookies = driver.get_cookies()
-
-            if not report_links:
-                st.error("No report links found. Please check the URL.")
-            else:
-                st.info(f"Found {len(report_links)} reports. Fetching data...")
-                req_session = requests.Session()
-                for cookie in selenium_cookies:
-                    req_session.cookies.set(cookie['name'], cookie['value'], domain=cookie['domain'])
-                req_session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"})
-
-                all_data = []
-                progress_bar = st.progress(0, text="Scraping reports...")
-                existing_labs = set(st.session_state.scraped_data['LabNum']) if 'LabNum' in st.session_state.scraped_data.columns else set()
-
-                for i, link_path in enumerate(report_links):
-                    full_report_url = f"https://psaweb.clemson.edu/soils/aspx/{link_path}"
-                    lab_num_str = parse_qs(urlparse(full_report_url).query).get('id', [None])[0]
-                    
-                    if lab_num_str and int(lab_num_str) in existing_labs:
-                        continue
-                    
-                    report_data = scrape_report_with_requests(req_session, full_report_url)
-                    if report_data:
-                        all_data.append(report_data)
-                    time.sleep(0.25)
-                    
-                    progress_bar.progress((i + 1) / len(report_links), text=f"Fetched report {i+1}/{len(report_links)}")
                 
-                if all_data:
-                    new_df = pd.DataFrame(all_data)
-                    st.session_state.scraped_data = pd.concat([st.session_state.scraped_data, new_df], ignore_index=True).drop_duplicates(subset=['LabNum']).sort_values(by='LabNum').reset_index(drop=True)
-                
-                st.success("Extraction complete! 🎉")
+                if not report_links:
+                    st.error("No report links found. Please check the URL.")
+                else:
+                    st.info(f"Found {len(report_links)} reports. Fetching data...")
+                    all_data = []
+                    progress_bar = st.progress(0, text="Scraping reports...")
+                    existing_labs = set(st.session_state.scraped_data['LabNum']) if 'LabNum' in st.session_state.scraped_data.columns else set()
 
-        except Exception as e:
-            st.error(f"A critical error occurred: {e}")
+                    for i, link_path in enumerate(report_links):
+                        full_report_url = f"https://psaweb.clemson.edu/soils/aspx/{link_path}"
+                        lab_num_str = parse_qs(urlparse(full_report_url).query).get('id', [None])[0]
+                        
+                        if lab_num_str and int(lab_num_str) in existing_labs:
+                            continue
+                        
+                        report_data = scrape_report(session, full_report_url)
+                        if report_data:
+                            all_data.append(report_data)
+                        time.sleep(0.2)
+                        
+                        progress_bar.progress((i + 1) / len(report_links), text=f"Fetched report {i+1}/{len(report_links)}")
+                    
+                    if all_data:
+                        new_df = pd.DataFrame(all_data)
+                        st.session_state.scraped_data = pd.concat([st.session_state.scraped_data, new_df], ignore_index=True).drop_duplicates(subset=['LabNum']).sort_values(by='LabNum').reset_index(drop=True)
+                    
+                    st.success("Extraction complete! 🎉")
+
+            except Exception as e:
+                st.error(f"A critical error occurred: {e}")
 
 if not st.session_state.scraped_data.empty:
     st.markdown("---")
