@@ -1,145 +1,78 @@
+# clemson_report_automation.py
+
 import streamlit as st
-import requests, re, time
-from bs4 import BeautifulSoup
 import pandas as pd
-from urllib.parse import urljoin, urlparse, parse_qs, urlencode
+import fitz  # PyMuPDF
+from io import BytesIO
 
-st.set_page_config(page_title="Clemson Soil Scraper – Full Data + Crop", layout="wide")
-st.title("🌱 Clemson Soil Report Scraper – Full Data + Crop Type")
+# Store processed report data
+if 'report_data' not in st.session_state:
+    st.session_state.report_data = []  # List of dicts, one per report
 
-st.markdown(
-    "Paste any Clemson **results.aspx** URL (with your LabNum range or date range), "
-    "click **Start Scraping**, and get a CSV with full soil data **plus** the Crop type "
-    "and the lab’s lime recommendation."
-)
+# --- STEP 1: Upload reports ---
+st.title("Clemson Soil Sample Report Automation")
+uploaded_files = st.file_uploader("Upload soil sample PDFs", type="pdf", accept_multiple_files=True)
 
-results_url = st.text_input(
-    "Results page URL",
-    "https://psaweb.clemson.edu/soils/aspx/results.aspx?"
-    "qs=1&LabNumA=25050901&LabNumB=25050930&DateA=&DateB=&Name=&"
-    "UserName=AGSRVLB&AdminAuth=0&submit=SEARCH",
-)
-
-# ---------------------------------------------------------------------------
-def txt_url_from_href(base_results_url: str, href: str) -> str:
-    """
-    Clemson's Lab # link is something like
-    standardreport.aspx?key=...&pval=...&id=25050901
-    Add &format=txt to get the plain‑text report.
-    """
-    full = urljoin(base_results_url, href)
-    parsed = urlparse(full)
-    qs = parse_qs(parsed.query, keep_blank_values=True)
-    qs["format"] = ["txt"]
-    new_query = urlencode(qs, doseq=True)
-    return parsed._replace(query=new_query).geturl()
-
-def extract_crop_and_lime(txt: str):
-    """Return (crop_type, lime_lbs_1000) from plain‑text report."""
-    crop = None
-    lime = None
-    crop_match = re.search(r"^Crop\s*:\s*(.+)$", txt, re.MULTILINE)
-    if crop_match:
-        crop = crop_match.group(1).strip()
-    lime_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*lbs/1000", txt)
-    if lime_match:
-        lime = lime_match.group(1)
-    elif "no lime" in txt.lower():
-        lime = "None"
-    return crop, lime
-
-# ---------------------------------------------------------------------------
-if st.button("Start Scraping"):
-    if not results_url.strip():
-        st.error("Please enter a valid results.aspx URL.")
-        st.stop()
-
-    with st.spinner("Scraping Clemson soil reports…"):
-        session = requests.Session()
-        session.headers.update({"User-Agent": "Mozilla/5.0"})
+if uploaded_files:
+    # Placeholder for initial CSV summary table
+    report_rows = []
+    for uploaded_file in uploaded_files:
+        file_bytes = uploaded_file.read()
+        pdf_text = ""
         try:
-            res = session.get(results_url, timeout=30)
-            res.raise_for_status()
-        except Exception as exc:
-            st.error(f"Failed to load results page: {exc}")
-            st.stop()
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            for page in doc:
+                pdf_text += page.get_text()
+        except Exception as e:
+            st.error(f"Could not read {uploaded_file.name}: {e}")
+            continue
 
-        soup = BeautifulSoup(res.text, "html.parser")
-        summary_tbl = next(
-            (t for t in soup.find_all("table")
-             if "Sample No" in t.get_text() and "Soil pH" in t.get_text()),
-            None
-        )
-        if not summary_tbl:
-            st.error("Could not find the main results table on that page.")
-            st.stop()
+        # Initial report row (without crop type)
+        row = {
+            "Filename": uploaded_file.name,
+            "Crop Type": "",
+            "Lime Amount": "",  # Placeholder; populate this elsewhere as needed
+            "PDF Text": pdf_text
+        }
+        report_rows.append(row)
 
-        records = []
-        for tr in summary_tbl.find_all("tr")[1:]:
-            td = tr.find_all("td")
-            if len(td) < 20:
-                continue  # skip blank / malformed rows
+    st.session_state.report_data = report_rows
 
-            name         = td[0].get_text(strip=True)
-            date_samp    = td[1].get_text(strip=True)
-            sample_no    = td[2].get_text(strip=True)
-            account_no   = re.sub(r"\D", "", sample_no)
-            lab_num      = td[3].get_text(strip=True)
-            href         = td[3].find("a")["href"] if td[3].find("a") else ""
-            soil_pH      = td[4].get_text(strip=True)
-            buffer_pH    = td[5].get_text(strip=True)
-            p_lbs, k_lbs, ca_lbs, mg_lbs = [td[i].get_text(strip=True) for i in range(6,10)]
-            zn_lbs, mn_lbs, cu_lbs, b_lbs = [td[i].get_text(strip=True) for i in range(10,14)]
-            na_lbs      = td[14].get_text(strip=True)
-            s_lbs       = td[15].get_text(strip=True)
-            ec          = td[16].get_text(strip=True)
-            no3_n       = td[17].get_text(strip=True)
-            om_pct      = td[18].get_text(strip=True)
-            bulk_den    = td[19].get_text(strip=True)
+# --- STEP 2: Show initial table ---
+if st.session_state.report_data:
+    df = pd.DataFrame([{
+        "Filename": r["Filename"],
+        "Crop Type": r["Crop Type"],
+        "Lime Amount": r["Lime Amount"]
+    } for r in st.session_state.report_data])
 
-            crop_type, lime_val = (None, None)
-            if href:
-                txt_url = txt_url_from_href(results_url, href)
-                try:
-                    txt_resp = session.get(txt_url, timeout=15)
-                    if txt_resp.ok:
-                        crop_type, lime_val = extract_crop_and_lime(txt_resp.text)
-                except Exception:
-                    pass  # silently continue; leave None if failed
+    st.write("### Soil Report Summary")
+    st.dataframe(df, use_container_width=True)
 
-            records.append({
-                "Account Number": account_no,
-                "Name": name,
-                "Date Sampled": date_samp,
-                "Sample No": sample_no,
-                "Lab Number": lab_num,
-                "Soil pH": soil_pH,
-                "Buffer pH": buffer_pH,
-                "P (lbs/A)": p_lbs,
-                "K (lbs/A)": k_lbs,
-                "Ca (lbs/A)": ca_lbs,
-                "Mg (lbs/A)": mg_lbs,
-                "Zn (lbs/A)": zn_lbs,
-                "Mn (lbs/A)": mn_lbs,
-                "Cu (lbs/A)": cu_lbs,
-                "B (lbs/A)": b_lbs,
-                "Na (lbs/A)": na_lbs,
-                "S (lbs/A)": s_lbs,
-                "EC (mmhos/cm)": ec,
-                "NO3‑N (ppm)": no3_n,
-                "OM (%)": om_pct,
-                "Bulk Density (lbs/A)": bulk_den,
-                "Crop Type": crop_type or "None",
-                "Lime (lbs/1000 ft²)": lime_val or "None",
-            })
-            time.sleep(0.25)  # polite pause
+    # --- STEP 3: Add Crop Screen Button ---
+    if st.button("Run Crop Screen"):
+        for row in st.session_state.report_data:
+            text = row["PDF Text"]
+            for crop in ["WarmSeasonGrsMaint(sq ft)", "CoolSeasonGrsMaint(sq ft)", "Centipedegrass(sq ft)"]:
+                if crop in text:
+                    row["Crop Type"] = crop
+                    break  # Only take the first match
 
-        df = pd.DataFrame(records)
-        st.success("✅ Extraction complete!")
+        # Update display table after crop match step
+        df = pd.DataFrame([{
+            "Filename": r["Filename"],
+            "Crop Type": r["Crop Type"],
+            "Lime Amount": r["Lime Amount"]
+        } for r in st.session_state.report_data])
+
+        st.success("Crop types added where detected.")
         st.dataframe(df, use_container_width=True)
+
+        # --- STEP 4: Download Updated CSV ---
+        csv = df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            "📥 Download CSV",
-            df.to_csv(index=False).encode("utf-8"),
-            "soil_full_data.csv",
+            label="Download Updated CSV",
+            data=csv,
+            file_name="updated_soil_report.csv",
             mime="text/csv"
         )
