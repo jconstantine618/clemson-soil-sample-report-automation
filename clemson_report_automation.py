@@ -36,29 +36,52 @@ def get_report_url(base_results_url: str, href: str) -> str:
 
 def extract_initial_data_with_bs(html_content: str):
     """
-    (Web Scraping) Extracts initial data using BeautifulSoup and reliable regex.
-    This function restores the original, accurate logic.
+    (Web Scraping) Extracts initial data using BeautifulSoup by navigating the HTML table.
+    This version is more robust and accurate for the initial pass.
     """
     if not html_content:
         return "None", "None"
         
     soup = BeautifulSoup(html_content, "html.parser")
-    # Get all the text from the HTML to run reliable regex on it
-    text = soup.get_text()
-    
     crop = "None"
     lime = "None"
     
-    # Original, reliable regex for finding the general crop type
-    crop_match = re.search(r"Crop\s*:\s*(.+)", text, re.IGNORECASE)
-    if crop_match:
-        crop = crop_match.group(1).strip()
-    
-    # Original, reliable regex for finding the lime value
-    lime_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*lbs/1000", text)
-    if lime_match:
-        lime = lime_match.group(1)
-    elif "no lime" in text.lower():
+    try:
+        # Find the 'Crop' header cell, which is a reliable anchor
+        crop_header_cell = soup.find('td', string=lambda t: t and 'Crop' in t and len(t.strip()) < 10)
+        
+        if crop_header_cell:
+            # The value row is the next `tr` after the header's `tr`
+            header_row = crop_header_cell.find_parent('tr')
+            value_row = header_row.find_next_sibling('tr')
+            
+            if value_row:
+                cells = value_row.find_all('td')
+                
+                # The first cell in the value row contains the crop name
+                if len(cells) > 0 and cells[0].find('b'):
+                    crop = cells[0].find('b').get_text(strip=True)
+                    
+                # The last cell contains the lime value
+                if len(cells) > 1 and cells[-1].find('b'):
+                    lime_text = cells[-1].find('b').get_text(strip=True)
+                    lime_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", lime_text)
+                    if lime_match:
+                        lime = lime_match.group(1)
+
+    except Exception:
+        # Fallback to the original regex method if the table navigation fails
+        text = soup.get_text()
+        crop_match = re.search(r"Crop\s*:\s*(.+)", text, re.IGNORECASE)
+        if crop_match:
+            crop = crop_match.group(1).strip()
+        
+        lime_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*lbs/1000", text)
+        if lime_match:
+            lime = lime_match.group(1)
+
+    # Final check for "no lime" text on the page as a fallback
+    if lime == "None" and "no lime" in soup.get_text(strip=True).lower():
         lime = "None"
 
     return crop, lime
