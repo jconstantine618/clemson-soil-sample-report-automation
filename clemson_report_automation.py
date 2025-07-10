@@ -36,45 +36,29 @@ def get_report_url(base_results_url: str, href: str) -> str:
 
 def extract_initial_data_with_bs(html_content: str):
     """
-    (Web Scraping) Extracts initial data using BeautifulSoup. This version is more robust.
+    (Web Scraping) Extracts initial data using BeautifulSoup and reliable regex.
+    This function restores the original, accurate logic.
     """
     if not html_content:
         return "None", "None"
         
     soup = BeautifulSoup(html_content, "html.parser")
+    # Get all the text from the HTML to run reliable regex on it
+    text = soup.get_text()
+    
     crop = "None"
     lime = "None"
     
-    try:
-        # Find the "Recommendations" header to anchor the search
-        recommendations_header = soup.find('b', string=lambda t: t and 'Recommendations' in t)
-        if recommendations_header:
-            # The crop and lime values are in the table immediately following the header
-            recommendations_table = recommendations_header.find_next('table')
-            if recommendations_table:
-                # The third `tr` in this table contains the crop and lime values
-                value_rows = recommendations_table.find_all('tr')
-                if len(value_rows) > 2:
-                    value_row = value_rows[2]
-                    cells = value_row.find_all('td')
-                    
-                    # Extract Crop from the first cell
-                    if len(cells) > 0 and cells[0].find('b'):
-                        crop = cells[0].find('b').get_text(strip=True)
-                        
-                    # Extract Lime from the last cell
-                    if len(cells) > 1 and cells[-1].find('b'):
-                        lime_text = cells[-1].find('b').get_text(strip=True)
-                        lime_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", lime_text)
-                        if lime_match:
-                            lime = lime_match.group(1)
-    except Exception:
-        # This block will catch any errors during parsing, ensuring the app doesn't crash.
-        # The values will remain "None".
-        pass
-        
-    # Final check for "no lime" text on the page as a fallback
-    if lime == "None" and soup.find(text=re.compile(r'no lime', re.IGNORECASE)):
+    # Original, reliable regex for finding the general crop type
+    crop_match = re.search(r"Crop\s*:\s*(.+)", text, re.IGNORECASE)
+    if crop_match:
+        crop = crop_match.group(1).strip()
+    
+    # Original, reliable regex for finding the lime value
+    lime_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*lbs/1000", text)
+    if lime_match:
+        lime = lime_match.group(1)
+    elif "no lime" in text.lower():
         lime = "None"
 
     return crop, lime
@@ -120,7 +104,6 @@ if st.button("Start Scraping", type="primary"):
         st.error("Please enter a valid results.aspx URL.")
         st.stop()
 
-    # Corrected spinner text
     with st.spinner("Scraping Clemson soil reports... (Initial Pass)"):
         session = requests.Session()
         session.headers.update({"User-Agent": "Mozilla/5.0"})
