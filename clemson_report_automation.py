@@ -36,7 +36,7 @@ def get_report_url(base_results_url: str, href: str) -> str:
 
 def extract_initial_data_with_bs(html_content: str):
     """
-    (Web Scraping) Extracts initial data using BeautifulSoup.
+    (Web Scraping) Extracts initial data using BeautifulSoup. This version is more robust.
     """
     if not html_content:
         return "None", "None"
@@ -46,26 +46,36 @@ def extract_initial_data_with_bs(html_content: str):
     lime = "None"
     
     try:
-        # Find the 'Crop' label and get the text from the next bold tag
-        crop_label = soup.find(lambda tag: tag.name == 'td' and 'Crop' in tag.get_text())
-        if crop_label:
-            crop_tag = crop_label.find_next('td').find('b')
-            if crop_tag:
-                crop = crop_tag.get_text(strip=True)
+        # Find the "Recommendations" header to anchor the search
+        recommendations_header = soup.find('b', string=lambda t: t and 'Recommendations' in t)
+        if recommendations_header:
+            # The crop and lime values are in the table immediately following the header
+            recommendations_table = recommendations_header.find_next('table')
+            if recommendations_table:
+                # The third `tr` in this table contains the crop and lime values
+                value_rows = recommendations_table.find_all('tr')
+                if len(value_rows) > 2:
+                    value_row = value_rows[2]
+                    cells = value_row.find_all('td')
+                    
+                    # Extract Crop from the first cell
+                    if len(cells) > 0 and cells[0].find('b'):
+                        crop = cells[0].find('b').get_text(strip=True)
+                        
+                    # Extract Lime from the last cell
+                    if len(cells) > 1 and cells[-1].find('b'):
+                        lime_text = cells[-1].find('b').get_text(strip=True)
+                        lime_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", lime_text)
+                        if lime_match:
+                            lime = lime_match.group(1)
     except Exception:
-        pass 
-
-    try:
-        # Find the lime value
-        lime_text_raw = soup.find(text=re.compile(r'lbs/1000sq ft'))
-        if lime_text_raw:
-            lime_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", lime_text_raw)
-            if lime_match:
-                lime = lime_match.group(1)
-        elif soup.find(text=re.compile(r'no lime', re.IGNORECASE)):
-            lime = "None"
-    except Exception:
+        # This block will catch any errors during parsing, ensuring the app doesn't crash.
+        # The values will remain "None".
         pass
+        
+    # Final check for "no lime" text on the page as a fallback
+    if lime == "None" and soup.find(text=re.compile(r'no lime', re.IGNORECASE)):
+        lime = "None"
 
     return crop, lime
 
@@ -110,6 +120,7 @@ if st.button("Start Scraping", type="primary"):
         st.error("Please enter a valid results.aspx URL.")
         st.stop()
 
+    # Corrected spinner text
     with st.spinner("Scraping Clemson soil reports... (Initial Pass)"):
         session = requests.Session()
         session.headers.update({"User-Agent": "Mozilla/5.0"})
