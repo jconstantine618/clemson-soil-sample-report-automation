@@ -3,19 +3,21 @@ import requests
 import re
 import time
 import pandas as pd
+import json
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse, parse_qs, urlencode
+from urllib.parse import urljoin
+import openai
 
 # --- Page Configuration ---
-st.set_page_config(page_title="Clemson Soil Scraper – Full Data + Crop", layout="wide")
+st.set_page_config(page_title="Clemson Soil Scraper – OpenAI Powered", layout="wide")
 
 # --- App Title and Description ---
-st.title("🌱 Clemson Soil Report Scraper – Full Data + Crop Type")
+st.title("🤖 Clemson Soil Report Scraper – OpenAI Powered")
 st.markdown(
-    "Paste any Clemson **results.aspx** URL (with your LabNum range or date range), "
-    "click **Start Scraping**, and get a CSV with full soil data. Then, you can optionally "
-    "run a second, more detailed scan to find specific crop types."
+    "This version uses OpenAI's GPT model to read the report pages. "
+    "It securely uses your OpenAI API key from Streamlit's secrets management."
 )
+st.info("To use this app, add your OpenAI API key to your Streamlit secrets file as `OPENAI_API_KEY`.")
 
 # --- User Input ---
 results_url = st.text_input(
@@ -28,83 +30,81 @@ results_url = st.text_input(
 
 # --- Helper Functions ---
 
-def txt_url_from_href(base_results_url: str, href: str) -> str:
-    """
-    Constructs the full URL for the report page.
-    The '&format=txt' parameter returns HTML, not text, so we'll parse it.
-    """
-    full = urljoin(base_results_url, href)
-    parsed = urlparse(full)
-    qs = parse_qs(parsed.query, keep_blank_values=True)
-    # The page still returns HTML even with this, but we'll keep it for consistency
-    qs["format"] = ["txt"] 
-    new_query = urlencode(qs, doseq=True)
-    return parsed._replace(query=new_query).geturl()
+def get_report_url(base_results_url: str, href: str) -> str:
+    """Constructs the full URL for the report page."""
+    return urljoin(base_results_url, href)
 
-def extract_data_from_report_html(soup: BeautifulSoup):
+def extract_data_with_openai(client: openai.OpenAI, html_content: str, mode: str = "initial"):
     """
-    Extracts the general crop type and lime recommendation from the parsed HTML of a report page.
-    """
-    crop = "None"
-    lime = "None"
+    Uses an OpenAI model to extract data from the report's HTML content.
     
-    try:
-        # Find the 'Crop' label and get the text from the next bold tag, which is the crop name
-        crop_label = soup.find(lambda tag: tag.name == 'td' and 'Crop' in tag.get_text())
-        if crop_label:
-            # The crop name is in a <b> tag in the next table cell
-            crop_tag = crop_label.find_next('td').find('b')
-            if crop_tag:
-                crop = crop_tag.get_text(strip=True)
-    except Exception:
-        pass # If we can't find it, it remains "None"
-
-    try:
-        # Lime value is typically in a <b> tag next to the crop name
-        lime_text_raw = soup.find(text=re.compile(r'lbs/1000sq ft'))
-        if lime_text_raw:
-            lime_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", lime_text_raw)
-            if lime_match:
-                lime = lime_match.group(1)
-        elif soup.find(text=re.compile(r'no lime', re.IGNORECASE)):
-            lime = "None"
-    except Exception:
-        pass # If we can't find it, it remains "None"
-
-    return crop, lime
-
-def find_specific_crop(soup: BeautifulSoup):
-    """
-    Performs the second-pass screen on the parsed HTML to find a specific crop type.
-    """
-    specific_crop_patterns = [
-        "WarmSeasonGrsMaint(sq ft)",
-        "CoolSeasonGrsMaint(sq ft)",
-        "Centipedegrass(sq ft)"
-    ]
+    Args:
+        client: The initialized OpenAI client.
+        html_content: The raw HTML of the report page.
+        mode: 'initial' for general crop/lime, 'specific' for the second pass.
     
-    # The specific crop name is usually inside a <b> tag.
-    bold_tags = soup.find_all('b')
-    for tag in bold_tags:
-        tag_text = tag.get_text(strip=True)
-        if tag_text in specific_crop_patterns:
-            return tag_text
-            
-    return None
+    Returns:
+        A tuple (crop, lime) for 'initial' mode, or just crop for 'specific' mode.
+    """
+    if not html_content:
+        return ("None", "None") if mode == "initial" else "None"
+
+    if mode == "initial":
+        system_prompt = """
+        You are an expert data extractor. Analyze the provided HTML and extract the general "Crop" and the "Lime" recommendation.
+        The lime value should be a number (e.g., '78'). If no lime is recommended, the value should be 'None'.
+        Return a single JSON object with keys "crop" and "lime".
+        """
+    else: # specific mode
+        system_prompt = """
+        You are an expert data extractor. Analyze the provided HTML. Your task is to find if one of the following exact crop names exists in the text: 
+        "WarmSeasonGrsMaint(sq ft)", "CoolSeasonGrsMaint(sq ft)", "Centipedegrass(sq ft)".
+        If you find an exact match, return a JSON object with a single key "crop" and the found crop name as the value.
+        If you do not find an exact match, the value for "crop" should be "None".
+        """
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": html_content}
+            ]
+        )
+        data = json.loads(response.choices[0].message.content)
+        
+        if mode == "initial":
+            crop = data.get("crop", "None")
+            lime = data.get("lime", "None")
+            return crop, str(lime) # Ensure lime is a string
+        else:
+            return data.get("crop", "None")
+
+    except (json.JSONDecodeError, AttributeError, Exception) as e:
+        st.warning(f"AI extraction failed for one report. Details: {e}")
+        return ("None", "None") if mode == "initial" else "None"
+
 
 # --- Main Application Logic ---
 
-# Initialize session state
 if 'df_results' not in st.session_state:
     st.session_state.df_results = None
 
-# "Start Scraping" button logic
 if st.button("Start Scraping", type="primary"):
+    # Check for the API key in secrets
+    if "OPENAI_API_KEY" not in st.secrets:
+        st.error("OpenAI API key not found. Please add it to your Streamlit secrets.")
+        st.stop()
+        
     if not results_url.strip():
         st.error("Please enter a valid results.aspx URL.")
         st.stop()
 
-    with st.spinner("Scraping Clemson soil reports... (Initial Pass)"):
+    # Initialize the OpenAI client with the secret key
+    client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
+    with st.spinner("Scraping Clemson soil reports... (AI Initial Pass)"):
         session = requests.Session()
         session.headers.update({"User-Agent": "Mozilla/5.0"})
         try:
@@ -115,11 +115,7 @@ if st.button("Start Scraping", type="primary"):
             st.stop()
 
         main_soup = BeautifulSoup(res.text, "html.parser")
-        summary_tbl = next(
-            (t for t in main_soup.find_all("table")
-             if "Sample No" in t.get_text() and "Soil pH" in t.get_text()),
-            None
-        )
+        summary_tbl = next((t for t in main_soup.find_all("table") if "Sample No" in t.get_text()), None)
         if not summary_tbl:
             st.error("Could not find the main results table on that page.")
             st.stop()
@@ -130,90 +126,78 @@ if st.button("Start Scraping", type="primary"):
 
         for i, tr in enumerate(rows):
             td = tr.find_all("td")
-            if len(td) < 20:
-                continue
+            if len(td) < 20: continue
 
-            name         = td[0].get_text(strip=True)
-            date_samp    = td[1].get_text(strip=True)
-            sample_no    = td[2].get_text(strip=True)
-            account_no   = re.sub(r"\D", "", sample_no)
-            lab_num      = td[3].get_text(strip=True)
-            href_tag     = td[3].find("a")
-            href         = href_tag["href"] if href_tag else ""
-            soil_pH      = td[4].get_text(strip=True)
-            buffer_pH    = td[5].get_text(strip=True)
-            p_lbs, k_lbs, ca_lbs, mg_lbs = [td[i].get_text(strip=True) for i in range(6,10)]
-            zn_lbs, mn_lbs, cu_lbs, b_lbs = [td[i].get_text(strip=True) for i in range(10,14)]
-            na_lbs       = td[14].get_text(strip=True)
-            s_lbs        = td[15].get_text(strip=True)
-            ec           = td[16].get_text(strip=True)
-            no3_n        = td[17].get_text(strip=True)
-            om_pct       = td[18].get_text(strip=True)
-            bulk_den     = td[19].get_text(strip=True)
+            href_tag = td[3].find("a")
+            href = href_tag["href"] if href_tag else ""
+            report_url = get_report_url(results_url, href) if href else ""
             
-            report_url = txt_url_from_href(results_url, href) if href else ""
-
-            # Store the HTML content for the second pass to avoid re-downloading
             report_html_content = ""
-            crop_type, lime_val = ("None", "None")
             if report_url:
                 try:
                     report_resp = session.get(report_url, timeout=15)
                     if report_resp.ok:
                         report_html_content = report_resp.text
-                        report_soup = BeautifulSoup(report_html_content, "html.parser")
-                        crop_type, lime_val = extract_data_from_report_html(report_soup)
                 except Exception:
                     pass
 
+            crop_type, lime_val = extract_data_with_openai(client, report_html_content, mode="initial")
+
             records.append({
-                "Account Number": account_no, "Name": name, "Date Sampled": date_samp,
-                "Sample No": sample_no, "Lab Number": lab_num, "Soil pH": soil_pH,
-                "Buffer pH": buffer_pH, "P (lbs/A)": p_lbs, "K (lbs/A)": k_lbs,
-                "Ca (lbs/A)": ca_lbs, "Mg (lbs/A)": mg_lbs, "Zn (lbs/A)": zn_lbs,
-                "Mn (lbs/A)": mn_lbs, "Cu (lbs/A)": cu_lbs, "B (lbs/A)": b_lbs,
-                "Na (lbs/A)": na_lbs, "S (lbs/A)": s_lbs, "EC (mmhos/cm)": ec,
-                "NO3-N (ppm)": no3_n, "OM (%)": om_pct, "Bulk Density (lbs/A)": bulk_den,
-                "Crop Type": crop_type or "None", "Lime (lbs/1000 ft²)": lime_val or "None",
-                "_report_html": report_html_content # Store the full HTML
+                "Account Number": re.sub(r"\D", "", td[2].get_text(strip=True)),
+                "Name": td[0].get_text(strip=True),
+                "Date Sampled": td[1].get_text(strip=True),
+                "Sample No": td[2].get_text(strip=True),
+                "Lab Number": td[3].get_text(strip=True),
+                "Soil pH": td[4].get_text(strip=True), "Buffer pH": td[5].get_text(strip=True),
+                "P (lbs/A)": td[6].get_text(strip=True), "K (lbs/A)": td[7].get_text(strip=True),
+                "Ca (lbs/A)": td[8].get_text(strip=True), "Mg (lbs/A)": td[9].get_text(strip=True),
+                "Zn (lbs/A)": td[10].get_text(strip=True), "Mn (lbs/A)": td[11].get_text(strip=True),
+                "Cu (lbs/A)": td[12].get_text(strip=True), "B (lbs/A)": td[13].get_text(strip=True),
+                "Na (lbs/A)": td[14].get_text(strip=True), "S (lbs/A)": td[15].get_text(strip=True),
+                "EC (mmhos/cm)": td[16].get_text(strip=True), "NO3-N (ppm)": td[17].get_text(strip=True),
+                "OM (%)": td[18].get_text(strip=True), "Bulk Density (lbs/A)": td[19].get_text(strip=True),
+                "Crop Type": crop_type, "Lime (lbs/1000 ft²)": lime_val,
+                "_report_html": report_html_content
             })
-            time.sleep(0.1)
-            progress_bar.progress((i + 1) / len(rows), text=f"Scraping report {i+1}/{len(rows)}")
+            time.sleep(0.2) # Be polite
+            progress_bar.progress((i + 1) / len(rows), text=f"AI processing report {i+1}/{len(rows)}")
 
         progress_bar.empty()
         st.session_state.df_results = pd.DataFrame(records)
-        st.success("✅ Initial extraction complete!")
+        st.success("✅ AI initial extraction complete!")
 
-# --- Display Area: Shows table and buttons if data exists ---
-
+# --- Display Area ---
 if st.session_state.df_results is not None:
     df_display = st.session_state.df_results.drop(columns=['_report_html'], errors='ignore')
     st.dataframe(df_display, use_container_width=True, hide_index=True)
 
     csv = df_display.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "📥 Download CSV", data=csv, file_name="soil_full_data.csv", mime="text/csv"
-    )
+    st.download_button("📥 Download CSV", data=csv, file_name="soil_full_data.csv", mime="text/csv")
 
     st.markdown("---")
 
-    # --- "Run Crop Screen" Button ---
     if st.button("Run Crop Screen"):
-        with st.spinner("Running detailed crop screen... This may take a moment."):
+        if "OPENAI_API_KEY" not in st.secrets:
+            st.error("OpenAI API key not found. Please add it to your Streamlit secrets.")
+            st.stop()
+        
+        client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+
+        with st.spinner("Running detailed AI crop screen..."):
             df = st.session_state.df_results.copy()
             updates_found = 0
+            progress_bar_specific = st.progress(0, text="Starting detailed crop screen...")
 
             for index, row in df.iterrows():
                 report_html = row["_report_html"]
                 if report_html:
-                    try:
-                        report_soup = BeautifulSoup(report_html, "html.parser")
-                        specific_crop = find_specific_crop(report_soup)
-                        if specific_crop:
-                            df.loc[index, 'Crop Type'] = specific_crop
-                            updates_found += 1
-                    except Exception as e:
-                        st.warning(f"Could not process report for {row['Lab Number']}: {e}")
+                    specific_crop = extract_data_with_openai(client, report_html, mode="specific")
+                    if specific_crop and specific_crop.lower() != "none":
+                        df.loc[index, 'Crop Type'] = specific_crop
+                        updates_found += 1
+                progress_bar_specific.progress((index + 1) / len(df), text=f"AI screening report {index + 1}/{len(df)}")
             
+            progress_bar_specific.empty()
             st.session_state.df_results = df
-            st.success(f"✅ Crop screen complete! Found and updated {updates_found} specific crop types.")
+            st.success(f"✅ AI crop screen complete! Found and updated {updates_found} specific crop types.")
