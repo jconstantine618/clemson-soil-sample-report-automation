@@ -23,62 +23,72 @@ results_url = st.text_input(
     "https://psaweb.clemson.edu/soils/aspx/results.aspx?"
     "qs=1&LabNumA=25050901&LabNumB=25050930&DateA=&DateB=&Name=&"
     "UserName=AGSRVLB&AdminAuth=0&submit=SEARCH",
-    key="results_url_input" # Added a unique key to prevent duplicate ID errors
+    key="results_url_input" 
 )
 
 # --- Helper Functions ---
 
 def txt_url_from_href(base_results_url: str, href: str) -> str:
     """
-    Constructs the full URL for the plain-text version of a single report
-    by adding '&format=txt' to the standard report link.
+    Constructs the full URL for the report page.
+    The '&format=txt' parameter returns HTML, not text, so we'll parse it.
     """
     full = urljoin(base_results_url, href)
     parsed = urlparse(full)
     qs = parse_qs(parsed.query, keep_blank_values=True)
-    qs["format"] = ["txt"]
+    # The page still returns HTML even with this, but we'll keep it for consistency
+    qs["format"] = ["txt"] 
     new_query = urlencode(qs, doseq=True)
     return parsed._replace(query=new_query).geturl()
 
-def extract_initial_data(txt: str):
+def extract_data_from_report_html(soup: BeautifulSoup):
     """
-    Performs the first-pass extraction to get the general crop type and lime recommendation
-    from the plain-text report.
+    Extracts the general crop type and lime recommendation from the parsed HTML of a report page.
     """
-    crop = None
-    lime = None
-    # Use a flexible, case-insensitive regex.
-    crop_match = re.search(r"Crop\s*:\s*(.+)", txt, re.IGNORECASE)
-    if crop_match:
-        crop = crop_match.group(1).strip()
+    crop = "None"
+    lime = "None"
     
-    # Find lime recommendation.
-    lime_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*lbs/1000", txt)
-    if lime_match:
-        lime = lime_match.group(1)
-    elif "no lime" in txt.lower():
-        lime = "None"
+    try:
+        # Find the 'Crop' label and get the text from the next bold tag, which is the crop name
+        crop_label = soup.find(lambda tag: tag.name == 'td' and 'Crop' in tag.get_text())
+        if crop_label:
+            # The crop name is in a <b> tag in the next table cell
+            crop_tag = crop_label.find_next('td').find('b')
+            if crop_tag:
+                crop = crop_tag.get_text(strip=True)
+    except Exception:
+        pass # If we can't find it, it remains "None"
+
+    try:
+        # Lime value is typically in a <b> tag next to the crop name
+        lime_text_raw = soup.find(text=re.compile(r'lbs/1000sq ft'))
+        if lime_text_raw:
+            lime_match = re.search(r"([0-9]+(?:\.[0-9]+)?)", lime_text_raw)
+            if lime_match:
+                lime = lime_match.group(1)
+        elif soup.find(text=re.compile(r'no lime', re.IGNORECASE)):
+            lime = "None"
+    except Exception:
+        pass # If we can't find it, it remains "None"
+
     return crop, lime
 
-def find_specific_crop(txt: str):
+def find_specific_crop(soup: BeautifulSoup):
     """
-    Performs the second-pass screen to find one of the specific maintenance crop types.
+    Performs the second-pass screen on the parsed HTML to find a specific crop type.
     """
-    # Standardized names to return for consistency
-    CROP_WARM = "WarmSeasonGrsMaint(sq ft)"
-    CROP_COOL = "CoolSeasonGrsMaint(sq ft)"
-    CROP_CENTI = "Centipedegrass(sq ft)"
-
-    # Flexible, case-insensitive patterns that handle whitespace variations.
-    patterns = {
-        CROP_WARM: r"WarmSeasonGrsMaint\s*\(\s*sq\s*ft\s*\)",
-        CROP_COOL: r"CoolSeasonGrsMaint\s*\(\s*sq\s*ft\s*\)",
-        CROP_CENTI: r"Centipedegrass\s*\(\s*sq\s*ft\s*\)"
-    }
-
-    for clean_name, pattern in patterns.items():
-        if re.search(pattern, txt, re.IGNORECASE):
-            return clean_name
+    specific_crop_patterns = [
+        "WarmSeasonGrsMaint(sq ft)",
+        "CoolSeasonGrsMaint(sq ft)",
+        "Centipedegrass(sq ft)"
+    ]
+    
+    # The specific crop name is usually inside a <b> tag.
+    bold_tags = soup.find_all('b')
+    for tag in bold_tags:
+        tag_text = tag.get_text(strip=True)
+        if tag_text in specific_crop_patterns:
+            return tag_text
             
     return None
 
@@ -87,8 +97,6 @@ def find_specific_crop(txt: str):
 # Initialize session state
 if 'df_results' not in st.session_state:
     st.session_state.df_results = None
-if 'debug_report_text' not in st.session_state:
-    st.session_state.debug_report_text = ""
 
 # "Start Scraping" button logic
 if st.button("Start Scraping", type="primary"):
@@ -106,9 +114,9 @@ if st.button("Start Scraping", type="primary"):
             st.error(f"Failed to load results page: {exc}")
             st.stop()
 
-        soup = BeautifulSoup(res.text, "html.parser")
+        main_soup = BeautifulSoup(res.text, "html.parser")
         summary_tbl = next(
-            (t for t in soup.find_all("table")
+            (t for t in main_soup.find_all("table")
              if "Sample No" in t.get_text() and "Soil pH" in t.get_text()),
             None
         )
@@ -143,20 +151,20 @@ if st.button("Start Scraping", type="primary"):
             om_pct       = td[18].get_text(strip=True)
             bulk_den     = td[19].get_text(strip=True)
             
-            txt_report_url = txt_url_from_href(results_url, href) if href else ""
+            report_url = txt_url_from_href(results_url, href) if href else ""
 
-            crop_type, lime_val = (None, None)
-            if txt_report_url:
+            # Store the HTML content for the second pass to avoid re-downloading
+            report_html_content = ""
+            crop_type, lime_val = ("None", "None")
+            if report_url:
                 try:
-                    txt_resp = session.get(txt_report_url, timeout=15)
-                    if txt_resp.ok:
-                        # For the first record, save its text for debugging
-                        if i == 0:
-                           st.session_state.debug_report_text = txt_resp.text
-                        crop_type, lime_val = extract_initial_data(txt_resp.text)
-                except Exception as e:
-                    if i == 0:
-                        st.session_state.debug_report_text = f"Error fetching report for debugging: {e}"
+                    report_resp = session.get(report_url, timeout=15)
+                    if report_resp.ok:
+                        report_html_content = report_resp.text
+                        report_soup = BeautifulSoup(report_html_content, "html.parser")
+                        crop_type, lime_val = extract_data_from_report_html(report_soup)
+                except Exception:
+                    pass
 
             records.append({
                 "Account Number": account_no, "Name": name, "Date Sampled": date_samp,
@@ -167,7 +175,7 @@ if st.button("Start Scraping", type="primary"):
                 "Na (lbs/A)": na_lbs, "S (lbs/A)": s_lbs, "EC (mmhos/cm)": ec,
                 "NO3-N (ppm)": no3_n, "OM (%)": om_pct, "Bulk Density (lbs/A)": bulk_den,
                 "Crop Type": crop_type or "None", "Lime (lbs/1000 ft²)": lime_val or "None",
-                "_report_url": txt_report_url
+                "_report_html": report_html_content # Store the full HTML
             })
             time.sleep(0.1)
             progress_bar.progress((i + 1) / len(rows), text=f"Scraping report {i+1}/{len(rows)}")
@@ -179,7 +187,7 @@ if st.button("Start Scraping", type="primary"):
 # --- Display Area: Shows table and buttons if data exists ---
 
 if st.session_state.df_results is not None:
-    df_display = st.session_state.df_results.drop(columns=['_report_url'], errors='ignore')
+    df_display = st.session_state.df_results.drop(columns=['_report_html'], errors='ignore')
     st.dataframe(df_display, use_container_width=True, hide_index=True)
 
     csv = df_display.to_csv(index=False).encode("utf-8")
@@ -187,43 +195,25 @@ if st.session_state.df_results is not None:
         "📥 Download CSV", data=csv, file_name="soil_full_data.csv", mime="text/csv"
     )
 
-    # --- Debugging Expander ---
-    if st.session_state.debug_report_text:
-        with st.expander("🕵️‍♀️ Debugging Info: Content of First Report"):
-            st.text(st.session_state.debug_report_text)
-
     st.markdown("---")
 
     # --- "Run Crop Screen" Button ---
     if st.button("Run Crop Screen"):
         with st.spinner("Running detailed crop screen... This may take a moment."):
             df = st.session_state.df_results.copy()
-            session = requests.Session()
-            session.headers.update({"User-Agent": "Mozilla/5.0"})
-            
-            num_rows = len(df)
-            progress_bar = st.progress(0, text="Starting crop screen...")
             updates_found = 0
 
             for index, row in df.iterrows():
-                report_url = row["_report_url"]
-                if report_url:
+                report_html = row["_report_html"]
+                if report_html:
                     try:
-                        txt_resp = session.get(report_url, timeout=15)
-                        if txt_resp.ok:
-                            specific_crop = find_specific_crop(txt_resp.text)
-                            if specific_crop:
-                                df.loc[index, 'Crop Type'] = specific_crop
-                                updates_found += 1
+                        report_soup = BeautifulSoup(report_html, "html.parser")
+                        specific_crop = find_specific_crop(report_soup)
+                        if specific_crop:
+                            df.loc[index, 'Crop Type'] = specific_crop
+                            updates_found += 1
                     except Exception as e:
-                        st.warning(f"Could not process report {row['Lab Number']}: {e}")
-                
-                time.sleep(0.1)
-                progress_bar.progress(
-                    (index + 1) / num_rows, 
-                    text=f"Screening report {index + 1}/{num_rows}..."
-                )
+                        st.warning(f"Could not process report for {row['Lab Number']}: {e}")
             
-            progress_bar.empty()
             st.session_state.df_results = df
             st.success(f"✅ Crop screen complete! Found and updated {updates_found} specific crop types.")
