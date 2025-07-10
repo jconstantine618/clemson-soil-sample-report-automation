@@ -43,16 +43,16 @@ def txt_url_from_href(base_results_url: str, href: str) -> str:
 def extract_initial_data(txt: str):
     """
     Performs the first-pass extraction to get the general crop type and lime recommendation
-    from the plain-text report. This is now more flexible.
+    from the plain-text report.
     """
     crop = None
     lime = None
-    # Use a more flexible, case-insensitive regex that doesn't require matching the start of a line.
+    # Use a flexible, case-insensitive regex.
     crop_match = re.search(r"Crop\s*:\s*(.+)", txt, re.IGNORECASE)
     if crop_match:
         crop = crop_match.group(1).strip()
     
-    # Find lime recommendation (e.g., "50 lbs/1000 sq ft")
+    # Find lime recommendation.
     lime_match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*lbs/1000", txt)
     if lime_match:
         lime = lime_match.group(1)
@@ -63,14 +63,13 @@ def extract_initial_data(txt: str):
 def find_specific_crop(txt: str):
     """
     Performs the second-pass screen to find one of the specific maintenance crop types.
-    This is now more flexible and returns a standardized name.
     """
     # Standardized names to return for consistency
     CROP_WARM = "WarmSeasonGrsMaint(sq ft)"
     CROP_COOL = "CoolSeasonGrsMaint(sq ft)"
     CROP_CENTI = "Centipedegrass(sq ft)"
 
-    # Use more flexible, case-insensitive patterns that handle whitespace variations.
+    # Flexible, case-insensitive patterns that handle whitespace variations.
     patterns = {
         CROP_WARM: r"WarmSeasonGrsMaint\s*\(\s*sq\s*ft\s*\)",
         CROP_COOL: r"CoolSeasonGrsMaint\s*\(\s*sq\s*ft\s*\)",
@@ -79,15 +78,17 @@ def find_specific_crop(txt: str):
 
     for clean_name, pattern in patterns.items():
         if re.search(pattern, txt, re.IGNORECASE):
-            return clean_name  # Return the standardized name if found
+            return clean_name
             
     return None
 
 # --- Main Application Logic ---
 
-# Initialize session state to hold the DataFrame
+# Initialize session state
 if 'df_results' not in st.session_state:
     st.session_state.df_results = None
+if 'debug_report_text' not in st.session_state:
+    st.session_state.debug_report_text = ""
 
 # "Start Scraping" button logic
 if st.button("Start Scraping", type="primary"):
@@ -124,7 +125,6 @@ if st.button("Start Scraping", type="primary"):
             if len(td) < 20:
                 continue
 
-            # Reverting to original data extraction structure for clarity
             name         = td[0].get_text(strip=True)
             date_samp    = td[1].get_text(strip=True)
             sample_no    = td[2].get_text(strip=True)
@@ -143,7 +143,6 @@ if st.button("Start Scraping", type="primary"):
             om_pct       = td[18].get_text(strip=True)
             bulk_den     = td[19].get_text(strip=True)
             
-            # We need the text URL for the second screening step later
             txt_report_url = txt_url_from_href(results_url, href) if href else ""
 
             crop_type, lime_val = (None, None)
@@ -151,62 +150,49 @@ if st.button("Start Scraping", type="primary"):
                 try:
                     txt_resp = session.get(txt_report_url, timeout=15)
                     if txt_resp.ok:
+                        # For the first record, save its text for debugging
+                        if i == 0:
+                           st.session_state.debug_report_text = txt_resp.text
                         crop_type, lime_val = extract_initial_data(txt_resp.text)
-                except Exception:
-                    pass  # Silently continue
+                except Exception as e:
+                    if i == 0:
+                        st.session_state.debug_report_text = f"Error fetching report for debugging: {e}"
 
             records.append({
-                "Account Number": account_no,
-                "Name": name,
-                "Date Sampled": date_samp,
-                "Sample No": sample_no,
-                "Lab Number": lab_num,
-                "Soil pH": soil_pH,
-                "Buffer pH": buffer_pH,
-                "P (lbs/A)": p_lbs,
-                "K (lbs/A)": k_lbs,
-                "Ca (lbs/A)": ca_lbs,
-                "Mg (lbs/A)": mg_lbs,
-                "Zn (lbs/A)": zn_lbs,
-                "Mn (lbs/A)": mn_lbs,
-                "Cu (lbs/A)": cu_lbs,
-                "B (lbs/A)": b_lbs,
-                "Na (lbs/A)": na_lbs,
-                "S (lbs/A)": s_lbs,
-                "EC (mmhos/cm)": ec,
-                "NO3-N (ppm)": no3_n,
-                "OM (%)": om_pct,
-                "Bulk Density (lbs/A)": bulk_den,
-                "Crop Type": crop_type or "None",
-                "Lime (lbs/1000 ft²)": lime_val or "None",
-                "_report_url": txt_report_url # Store URL for the second step
+                "Account Number": account_no, "Name": name, "Date Sampled": date_samp,
+                "Sample No": sample_no, "Lab Number": lab_num, "Soil pH": soil_pH,
+                "Buffer pH": buffer_pH, "P (lbs/A)": p_lbs, "K (lbs/A)": k_lbs,
+                "Ca (lbs/A)": ca_lbs, "Mg (lbs/A)": mg_lbs, "Zn (lbs/A)": zn_lbs,
+                "Mn (lbs/A)": mn_lbs, "Cu (lbs/A)": cu_lbs, "B (lbs/A)": b_lbs,
+                "Na (lbs/A)": na_lbs, "S (lbs/A)": s_lbs, "EC (mmhos/cm)": ec,
+                "NO3-N (ppm)": no3_n, "OM (%)": om_pct, "Bulk Density (lbs/A)": bulk_den,
+                "Crop Type": crop_type or "None", "Lime (lbs/1000 ft²)": lime_val or "None",
+                "_report_url": txt_report_url
             })
-            time.sleep(0.1)  # Polite pause
+            time.sleep(0.1)
             progress_bar.progress((i + 1) / len(rows), text=f"Scraping report {i+1}/{len(rows)}")
 
         progress_bar.empty()
         st.session_state.df_results = pd.DataFrame(records)
         st.success("✅ Initial extraction complete!")
-        # No st.rerun() needed here. Streamlit handles it.
 
 # --- Display Area: Shows table and buttons if data exists ---
 
 if st.session_state.df_results is not None:
-    # Make a copy for display that doesn't show our internal URL column
     df_display = st.session_state.df_results.drop(columns=['_report_url'], errors='ignore')
     st.dataframe(df_display, use_container_width=True, hide_index=True)
 
-    # --- CSV Download Button ---
-    # Use the display version for the download so the internal URL isn't in the CSV
     csv = df_display.to_csv(index=False).encode("utf-8")
     st.download_button(
-        "📥 Download CSV",
-        data=csv,
-        file_name="soil_full_data.csv",
-        mime="text/csv"
+        "📥 Download CSV", data=csv, file_name="soil_full_data.csv", mime="text/csv"
     )
 
-    st.markdown("---") # Visual separator
+    # --- Debugging Expander ---
+    if st.session_state.debug_report_text:
+        with st.expander("🕵️‍♀️ Debugging Info: Content of First Report"):
+            st.text(st.session_state.debug_report_text)
+
+    st.markdown("---")
 
     # --- "Run Crop Screen" Button ---
     if st.button("Run Crop Screen"):
@@ -227,19 +213,17 @@ if st.session_state.df_results is not None:
                         if txt_resp.ok:
                             specific_crop = find_specific_crop(txt_resp.text)
                             if specific_crop:
-                                # Update the 'Crop Type' column with the specific finding
                                 df.loc[index, 'Crop Type'] = specific_crop
                                 updates_found += 1
                     except Exception as e:
                         st.warning(f"Could not process report {row['Lab Number']}: {e}")
                 
-                time.sleep(0.1) # Polite pause
+                time.sleep(0.1)
                 progress_bar.progress(
                     (index + 1) / num_rows, 
                     text=f"Screening report {index + 1}/{num_rows}..."
                 )
             
             progress_bar.empty()
-            st.session_state.df_results = df # Save the updated dataframe
+            st.session_state.df_results = df
             st.success(f"✅ Crop screen complete! Found and updated {updates_found} specific crop types.")
-            # No st.rerun() needed here. Streamlit handles the refresh automatically.
