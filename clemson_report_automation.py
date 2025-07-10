@@ -42,12 +42,12 @@ def txt_url_from_href(base_results_url: str, href: str) -> str:
 def extract_initial_data(txt: str):
     """
     Performs the first-pass extraction to get the general crop type and lime recommendation
-    from the plain-text report.
+    from the plain-text report. This is now more flexible.
     """
     crop = None
     lime = None
-    # Find general crop type (e.g., "Crop : Centipedegrass")
-    crop_match = re.search(r"^Crop\s*:\s*(.+)$", txt, re.MULTILINE)
+    # Use a more flexible, case-insensitive regex that doesn't require matching the start of a line.
+    crop_match = re.search(r"Crop\s*:\s*(.+)", txt, re.IGNORECASE)
     if crop_match:
         crop = crop_match.group(1).strip()
     
@@ -62,18 +62,24 @@ def extract_initial_data(txt: str):
 def find_specific_crop(txt: str):
     """
     Performs the second-pass screen to find one of the specific maintenance crop types.
-    Returns the found text or None.
+    This is now more flexible and returns a standardized name.
     """
-    # Search for the specific maintenance strings
-    specific_crop_patterns = [
-        r"WarmSeasonGrsMaint\(sq ft\)",
-        r"CoolSeasonGrsMaint\(sq ft\)",
-        r"Centipedegrass\(sq ft\)"
-    ]
-    for pattern in specific_crop_patterns:
-        match = re.search(pattern, txt)
-        if match:
-            return match.group(0) # Return the exact text that was found
+    # Standardized names to return for consistency
+    CROP_WARM = "WarmSeasonGrsMaint(sq ft)"
+    CROP_COOL = "CoolSeasonGrsMaint(sq ft)"
+    CROP_CENTI = "Centipedegrass(sq ft)"
+
+    # Use more flexible, case-insensitive patterns that handle whitespace variations.
+    patterns = {
+        CROP_WARM: r"WarmSeasonGrsMaint\s*\(\s*sq\s*ft\s*\)",
+        CROP_COOL: r"CoolSeasonGrsMaint\s*\(\s*sq\s*ft\s*\)",
+        CROP_CENTI: r"Centipedegrass\s*\(\s*sq\s*ft\s*\)"
+    }
+
+    for clean_name, pattern in patterns.items():
+        if re.search(pattern, txt, re.IGNORECASE):
+            return clean_name  # Return the standardized name if found
+            
     return None
 
 # --- Main Application Logic ---
