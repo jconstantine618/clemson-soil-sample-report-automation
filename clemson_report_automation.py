@@ -34,6 +34,7 @@ def get_report_url(base_results_url: str, href: str) -> str:
     """Constructs the full URL for the report page."""
     return urljoin(base_results_url, href)
 
+
 def extract_initial_data_with_bs(html_content: str):
     """
     (Web Scraping) Extracts initial data using BeautifulSoup by navigating the HTML table.
@@ -85,6 +86,28 @@ def extract_initial_data_with_bs(html_content: str):
         lime = "None"
 
     return crop, lime
+
+
+# --- New: Phosphorus extraction from Comments ---
+# Match the number immediately before "lbs triple phosphate (0-46-0)"
+# Tolerates lb/lbs/pounds and various dash characters in 0-46-0
+_PHOS_RE = re.compile(
+    r"(?i)\b(\d+(?:\.\d+)?)\s*(?:lb|lbs|pounds)\s+triple\s+phosphate\s*\(\s*0\s*[-–—]\s*46\s*[-–—]\s*0\s*\)"
+)
+
+def extract_phosphorus_lbs_from_html(html_content: str) -> str:
+    """Return the numeric lbs of triple phosphate from the Comments section, or 'None'."""
+    if not html_content:
+        return "None"
+    try:
+        soup = BeautifulSoup(html_content, "html.parser")
+        # Normalize whitespace/newlines so regex can match across line breaks
+        text = " ".join(soup.get_text(separator=" ").split())
+        m = _PHOS_RE.search(text)
+        return m.group(1) if m else "None"
+    except Exception:
+        return "None"
+
 
 def find_specific_crop_with_openai(client: openai.OpenAI, html_content: str):
     """
@@ -149,7 +172,8 @@ if st.button("Start Scraping", type="primary"):
 
         for i, tr in enumerate(rows):
             td = tr.find_all("td")
-            if len(td) < 20: continue
+            if len(td) < 20: 
+                continue
 
             href_tag = td[3].find("a")
             href = href_tag["href"] if href_tag else ""
@@ -165,6 +189,7 @@ if st.button("Start Scraping", type="primary"):
                     pass
 
             crop_type, lime_val = extract_initial_data_with_bs(report_html_content)
+            phosphorus_val = extract_phosphorus_lbs_from_html(report_html_content)
 
             records.append({
                 "Account Number": re.sub(r"\D", "", td[2].get_text(strip=True)),
@@ -181,9 +206,10 @@ if st.button("Start Scraping", type="primary"):
                 "EC (mmhos/cm)": td[16].get_text(strip=True), "NO3-N (ppm)": td[17].get_text(strip=True),
                 "OM (%)": td[18].get_text(strip=True), "Bulk Density (lbs/A)": td[19].get_text(strip=True),
                 "Crop Type": crop_type, "Lime (lbs/1000 ft²)": lime_val,
+                "Phosphorus (lbs)": phosphorus_val,
                 "_report_html": report_html_content
             })
-            time.sleep(0.1) # Be polite
+            time.sleep(0.1)  # Be polite
             progress_bar.progress((i + 1) / len(rows), text=f"Scraping report {i+1}/{len(rows)}")
 
         progress_bar.empty()
