@@ -88,35 +88,23 @@ def extract_initial_data_with_bs(html_content: str):
     return crop, lime
 
 
-# --- Phosphorus from Comments ---
-# Capture the number immediately before the (super)phosphate recommendation *in the Comments block*
-# Handles lb/lbs/pounds and dash variants in 0-46-0, plus "triple superphosphate" or "triple phosphate"
-_PHOS_NUM_RE = re.compile(r"""(?ix)
-    \b(\d+(?:\.\d+)?)\s*(?:lb\.?|lbs\.?|pounds)\s+
-    (?:triple\s+)?(?:super\s*[- ]?)?phosphate
-    \s*\(\s*0\s*[-–—]\s*46\s*[-–—]\s*0\s*\)
-""")
-# Explicit negations override any numeric mention nearby
-_PHOS_NEG_RE = re.compile(r"""(?i)
-    (?:no|none|not\s+needed|do\s+not\s+apply)[^.]{0,120}?
-    (?:triple\s+)?(?:super\s*[- ]?)?phosphate
-""")
+# --- New: Phosphorus extraction from Comments ---
+# Match the number immediately before "lbs triple phosphate (0-46-0)"
+# Tolerates lb/lbs/pounds and various dash characters in 0-46-0
+_PHOS_RE = re.compile(
+    r"(?i)\b(\d+(?:\.\d+)?)\s*(?:lb|lbs|pounds)\s+triple\s+phosphate\s*\(\s*0\s*[-–—]\s*46\s*[-–—]\s*0\s*\)"
+)
 
 def extract_phosphorus_lbs_from_html(html_content: str) -> str:
-    """Return lbs of triple (super)phosphate from Comments, or 'None' if not recommended."""
+    """Return the numeric lbs of triple phosphate from the Comments section, or 'None'."""
     if not html_content:
         return "None"
     try:
         soup = BeautifulSoup(html_content, "html.parser")
+        # Normalize whitespace/newlines so regex can match across line breaks
         text = " ".join(soup.get_text(separator=" ").split())
-        # Isolate Comments block (best effort)
-        m = re.search(r"(?i)comments\s*[:\-]?\s*(.*)$", text)
-        comments = m.group(1) if m else text
-        # If explicitly negated, return None
-        if _PHOS_NEG_RE.search(comments):
-            return "None"
-        m2 = _PHOS_NUM_RE.search(comments)
-        return m2.group(1) if m2 else "None"
+        m = _PHOS_RE.search(text)
+        return m.group(1) if m else "None"
     except Exception:
         return "None"
 
@@ -184,7 +172,7 @@ if st.button("Start Scraping", type="primary"):
 
         for i, tr in enumerate(rows):
             td = tr.find_all("td")
-            if len(td) < 20:
+            if len(td) < 20: 
                 continue
 
             href_tag = td[3].find("a")
